@@ -209,14 +209,20 @@ async function openChatWindow(): Promise<void> {
   }
   debug("creating chat window…");
 
-  // Preferred spot: centered above the pet with an 8px gap. Clamped into the
-  // current monitor; when there is no headroom above, park beside the pet.
+  // Preferred spot: centered above the pet with an 8px gap. All geometry is
+  // computed in LOGICAL pixels: outerPosition/outerSize/monitor metrics come
+  // back in physical pixels while the constructor options are logical —
+  // round 1 mixed the two and the bubble landed half off-screen.
   // Each probe reports its own failure — a silent `catch(() => null)` here
   // would leave the chain hanging with no visible trace.
   let x: number | undefined;
   let y: number | undefined;
   const petWin = getCurrentWindow();
-  const [petPos, petSize, monitor] = await Promise.all([
+  const [mon, petPos, petSize] = await Promise.all([
+    currentMonitor().catch((err: unknown) => {
+      showDebug(`currentMonitor failed: ${errorText(err)}`);
+      return null;
+    }),
     petWin.outerPosition().catch((err: unknown) => {
       showDebug(`outerPosition failed: ${errorText(err)}`);
       return null;
@@ -225,23 +231,43 @@ async function openChatWindow(): Promise<void> {
       showDebug(`outerSize failed: ${errorText(err)}`);
       return null;
     }),
-    currentMonitor().catch((err: unknown) => {
-      showDebug(`currentMonitor failed: ${errorText(err)}`);
-      return null;
-    }),
   ]);
-  if (petPos && petSize && monitor) {
-    const mon = monitor.position;
-    const size = monitor.size;
-    x = petPos.x + Math.round((petSize.width - CHAT_WIDTH) / 2);
-    y = petPos.y - CHAT_GAP_PX - CHAT_HEIGHT;
-    if (y < mon.y) {
-      // no headroom above → place to the right of the pet
-      x = petPos.x + petSize.width + CHAT_GAP_PX;
-      y = petPos.y;
+  const sf =
+    mon?.scaleFactor ??
+    (await petWin.scaleFactor().catch((err: unknown) => {
+      showDebug(`scaleFactor failed: ${errorText(err)}`);
+      return 1;
+    })) ??
+    1;
+  if (petPos && petSize) {
+    const petL = {
+      x: petPos.x / sf,
+      y: petPos.y / sf,
+      w: petSize.width / sf,
+      h: petSize.height / sf,
+    };
+    x = Math.round(petL.x + (petL.w - CHAT_WIDTH) / 2);
+    y = Math.round(petL.y - CHAT_GAP_PX - CHAT_HEIGHT);
+    if (mon) {
+      const monL = {
+        x: mon.position.x / sf,
+        y: mon.position.y / sf,
+        w: mon.size.width / sf,
+        h: mon.size.height / sf,
+      };
+      if (y < monL.y) {
+        // no headroom above → try to the right of the pet
+        x = Math.round(petL.x + petL.w + CHAT_GAP_PX);
+        y = Math.round(petL.y);
+        if (x + CHAT_WIDTH > monL.x + monL.w) {
+          // right overflows → try to the left of the pet
+          x = Math.round(petL.x - CHAT_WIDTH - CHAT_GAP_PX);
+        }
+      }
+      // final clamp into the monitor; without a monitor skip it entirely
+      x = Math.min(Math.max(x, monL.x), monL.x + monL.w - CHAT_WIDTH);
+      y = Math.min(Math.max(y, monL.y), monL.y + monL.h - CHAT_HEIGHT);
     }
-    x = Math.min(Math.max(x, mon.x), mon.x + size.width - CHAT_WIDTH);
-    y = Math.min(Math.max(y, mon.y), mon.y + size.height - CHAT_HEIGHT);
   }
 
   // Outcome listeners are in place around the constructor (see above): the

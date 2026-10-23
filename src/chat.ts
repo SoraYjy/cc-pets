@@ -36,6 +36,23 @@ function systemLine(text: string): void {
   scrollBottom();
 }
 
+// Persistent "connected" line: repeated init events update the timestamp in
+// place instead of stacking one line per init (round 3 dedupe).
+let connectedLine: HTMLElement | null = null;
+
+function showConnected(): void {
+  const time = new Date().toLocaleTimeString();
+  if (connectedLine && connectedLine.isConnected) {
+    connectedLine.textContent = `会话已连接 @ ${time}`;
+    return;
+  }
+  connectedLine = document.createElement("div");
+  connectedLine.className = "sysline";
+  connectedLine.textContent = `会话已连接 @ ${time}`;
+  messagesEl.appendChild(connectedLine);
+  scrollBottom();
+}
+
 // Turn summaries go to the top of the message area, newest first — they are
 // status notices, not part of the conversation flow.
 function summaryLine(text: string): void {
@@ -120,7 +137,7 @@ sendBtn.addEventListener("click", () => void send());
 
 void listen<ChatEventPayload>("chat-event", (e) => {
   if (e.payload.kind === "init") {
-    systemLine("会话已连接");
+    showConnected();
     return;
   }
   if (e.payload.kind === "text") {
@@ -149,3 +166,9 @@ void getCurrentWindow().onCloseRequested(() => {
 });
 
 inputEl.focus();
+
+// Round-3 probe: if the message list ever clears and a NEW loaded line shows
+// up, the window/page was re-created (all JS state reset — investigate the
+// re-creation source next); a cleared list WITHOUT a new loaded line means
+// the wipe happened inside this page's JS state instead.
+systemLine(`chat window loaded @ ${new Date().toLocaleTimeString()}`);

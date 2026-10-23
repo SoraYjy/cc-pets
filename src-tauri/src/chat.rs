@@ -161,10 +161,23 @@ pub fn stop_internal(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// spawn 常驻 claude 对话进程。已有实例先 stop（幂等换新）。
-/// 返回 Ok(子进程 pid 字符串)；session_id 稍后随 init 事件异步到达。
+/// spawn 常驻 claude 对话进程。已有活实例直接复用、不再 kill 重启——重复
+/// 点击会打断进行中的对话并堆一排「会话已连接」，修复轮 3 裁定废弃原
+/// 「已存在先 kill 重启」计划；仅当无实例或旧实例已退出时才 spawn 新进程。
+/// 返回 Ok(子进程 pid 字符串；活实例复用时为 "already running")；
+/// session_id 稍后随 init 事件异步到达。
 #[tauri::command]
 pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    // 活实例探测：try_wait Ok(None) = 进程还活着，直接复用。锁内只做探测，
+    // 锁外再走 stop_internal（它要拿同一把锁，持锁调用会死锁）。
+    {
+        let mut slot = chat_slot().lock().expect("chat slot poisoned");
+        if let Some(p) = slot.as_mut() {
+            if p.child.try_wait().map_or(false, |st| st.is_none()) {
+                return Ok("already running".to_string());
+            }
+        }
+    }
     let _ = stop_internal(&state);
 
     let home = dirs::home_dir().ok_or_else(|| "home dir not found".to_string())?;
