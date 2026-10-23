@@ -1,0 +1,40 @@
+{
+  "id": "lynn",
+  "displayName": "Lynn",
+  "description": "Lynn official spritesheet, imported from the generated cat grid image by scripts/import_generated_sheet.py",
+  "spriteVersionNumber": 2,
+  "spritesheetPath": "spritesheet.png",
+  "cellWidth": 192,
+  "cellHeight": 208,
+  "columns": 8,
+  "animations": [
+    {
+      "name": "idle",
+      "row": 0,
+      "frames": 4,
+      "fps": 3,
+      "loop": true
+    },
+    {
+      "name": "working",
+      "row": 1,
+      "frames": 8,
+      "fps": 6,
+      "loop": true
+    },
+    {
+      "name": "done",
+      "row": 2,
+      "frames": 4,
+      "fps": 4,
+      "loop": false
+    },
+    {
+      "name": "wave",
+      "row": 3,
+      "frames": 4,
+      "fps": 5,
+      "loop": false
+    }
+  ]
+}

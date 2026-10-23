@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Lynn placeholder pet preview</title>
+<style>
+  body { background: #20242e; color: #dfe6f3; font: 14px/1.5 monospace;
+         margin: 24px; }
+  h1 { font-size: 18px; } .row { display: flex; gap: 28px; flex-wrap: wrap; }
+  .panel { text-align: center; }
+  .cell { width: 384px; height: 416px; image-rendering: pixelated;
+    background-image: url("pet/spritesheet.png");
+    background-size: 3072px 1664px;
+    background-repeat: no-repeat;
+    outline: 1px solid #465; }
+  .cell.checker { background-image:
+    url("pet/spritesheet.png"),
+    repeating-conic-gradient(#2c3140 0% 25%, #232838 0% 50%);
+  background-size: 3072px 1664px, 16px 16px;
+  background-repeat: no-repeat, repeat; }
+  .once { animation-iteration-count: 1; animation-fill-mode: forwards; }
+  @keyframes play-idle    { to { background-position: -1536px 0; } }
+  @keyframes play-working { to { background-position: -3072px -416px; } }
+  @keyframes play-done    { to { background-position: -1152px -832px; } }
+  @keyframes play-wave    { to { background-position: -1152px -1248px; } }
+  .static-idle { background-position: 0 0; }
+  .tag { display: inline-block; margin: 6px 0; padding: 1px 8px;
+          border: 1px solid #567; border-radius: 10px; color: #bcd; }
+</style>
+</head>
+<body>
+<h1>Lynn &mdash; placeholder pet spritesheet preview (2x)</h1>
+<div class="row">
+<div class="panel">
+  <div class="cell checker" style="animation-name: play-idle; animation-duration: 1.3333333333333333s; animation-timing-function: steps(4, end); background-position: 0 -0px;"></div>
+  <div><span class="tag">idle &middot; 4f &middot; 3fps &middot; loop=true</span></div>
+</div>
+<div class="panel">
+  <div class="cell checker" style="animation-name: play-working; animation-duration: 1.3333333333333333s; animation-timing-function: steps(8, end); background-position: 0 -416px;"></div>
+  <div><span class="tag">working &middot; 8f &middot; 6fps &middot; loop=true</span></div>
+</div>
+<div class="panel">
+  <div class="cell checker once" style="animation-name: play-done; animation-duration: 1.0s; animation-timing-function: steps(3, end); background-position: 0 -832px;"></div>
+  <div><span class="tag">done &middot; 4f &middot; 4fps &middot; loop=false</span></div>
+</div>
+<div class="panel">
+  <div class="cell checker once" style="animation-name: play-wave; animation-duration: 0.8s; animation-timing-function: steps(3, end); background-position: 0 -1248px;"></div>
+  <div><span class="tag">wave &middot; 4f &middot; 5fps &middot; loop=false</span></div>
+</div>
+</div>
+<h2>idle frame 0 (static)</h2>
+<div class="row"><div class="panel">
+  <div class="cell checker static-idle"></div>
+  <div><span class="tag">idle f0 static</span></div>
+</div></div>
+</body>
+</html>
