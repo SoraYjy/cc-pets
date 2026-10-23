@@ -17,14 +17,18 @@ body {
 }
 
 #debug-line {
-  /* Diagnostic line (see showDebug in main.ts): a single red line 8px below
-     the pet cell, filled by main.ts and kept to one line. */
+  /* Diagnostic line (see showDebug in main.ts). Round-1 placement (top:216px)
+     sat OUTSIDE the 208px pet window and was never visible — pinned to the
+     window bottom instead so it is always on-screen. */
   position: fixed;
-  top: 216px; /* pet cell 208px + 8px gap */
-  left: 0;
-  max-width: 100vw;
-  font-size: 10px;
-  color: red;
-  white-space: nowrap;
+  bottom: 4px;
+  left: 4px;
+  right: 4px;
+  z-index: 9999;
+  font-size: 9px;
+  line-height: 1.2;
+  max-height: 40px;
   overflow: hidden;
+  color: #ff6b6b;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
 }

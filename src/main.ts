@@ -53,6 +53,13 @@ function showDebug(msg: string): void {
   setDebugLine(msg);
 }
 
+// Breadcrumb (fix round 2): informational step marker on the same debug line,
+// no console.error — later crumbs overwrite earlier ones, and success tails
+// pass a clearAfter so the line empties itself once everything worked.
+function debug(msg: string, clearAfterMs?: number): void {
+  setDebugLine(msg, clearAfterMs);
+}
+
 // Best-effort readable text for arbitrary error values (invoke rejections are
 // usually plain strings, JS failures are Error objects).
 function errorText(err: unknown): string {
@@ -184,23 +191,44 @@ function setupChatWindowListeners(): void {
 }
 
 async function openChatWindow(): Promise<void> {
-  const existing = await WebviewWindow.getByLabel(CHAT_LABEL);
+  debug("opening chat window…");
+
+  let existing: WebviewWindow | null = null;
+  try {
+    existing = await WebviewWindow.getByLabel(CHAT_LABEL);
+  } catch (err) {
+    // Keep going: the create attempt below will surface its own outcome.
+    showDebug(`getByLabel failed: ${errorText(err)}`);
+  }
   if (existing) {
+    debug("chat exists", 5000);
     await existing
       .setFocus()
       .catch((err: unknown) => showDebug(`chat setFocus failed: ${errorText(err)}`));
     return;
   }
+  debug("creating chat window…");
 
   // Preferred spot: centered above the pet with an 8px gap. Clamped into the
   // current monitor; when there is no headroom above, park beside the pet.
+  // Each probe reports its own failure — a silent `catch(() => null)` here
+  // would leave the chain hanging with no visible trace.
   let x: number | undefined;
   let y: number | undefined;
   const petWin = getCurrentWindow();
   const [petPos, petSize, monitor] = await Promise.all([
-    petWin.outerPosition().catch(() => null),
-    petWin.outerSize().catch(() => null),
-    currentMonitor().catch(() => null),
+    petWin.outerPosition().catch((err: unknown) => {
+      showDebug(`outerPosition failed: ${errorText(err)}`);
+      return null;
+    }),
+    petWin.outerSize().catch((err: unknown) => {
+      showDebug(`outerSize failed: ${errorText(err)}`);
+      return null;
+    }),
+    currentMonitor().catch((err: unknown) => {
+      showDebug(`currentMonitor failed: ${errorText(err)}`);
+      return null;
+    }),
   ]);
   if (petPos && petSize && monitor) {
     const mon = monitor.position;
@@ -234,19 +262,24 @@ async function openChatWindow(): Promise<void> {
   });
   void chat.once("tauri://created", () => onChatWindowCreated());
   void chat.once("tauri://error", (e) => onChatWindowError(e.payload));
+  // If neither event ever lands, the trail stops here — that absence is the
+  // diagnostic signal (e.g. the IPC never settled).
+  debug("constructor returned, waiting created/error…");
 }
 
 // ===== Click/drag =====
 
 function onClickPet(): void {
   try {
+    debug("pet clicked");
     playAnimation("wave");
     openChatWindow().catch((err: unknown) =>
       showDebug(`openChatWindow failed: ${errorText(err)}`),
     );
-    invoke("spawn_chat").catch((err: unknown) =>
-      showDebug(`spawn_chat failed: ${errorText(err)}`),
-    );
+    // spawn_chat resolves with the child pid (chat.rs: Ok(pid.to_string())).
+    invoke<string>("spawn_chat")
+      .then((pid) => debug(`spawn_chat ok: ${pid}`, 5000))
+      .catch((err: unknown) => showDebug(`spawn_chat failed: ${errorText(err)}`));
   } catch (err) {
     showDebug(`onClickPet failed: ${errorText(err)}`);
   }
