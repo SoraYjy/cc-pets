@@ -52,6 +52,14 @@ mod debug_log {
     pub fn append_debug(line: String) {
         log_line(&line);
     }
+
+    /// 启动截断（round 5 清理机制）：每次启动 = 全新日志，防历史噪音无限
+    /// 累积；随后由 setup 打一条启动标记对齐时间线。
+    pub(crate) fn truncate() {
+        if let Some(p) = path() {
+            let _ = std::fs::write(p, b"");
+        }
+    }
 }
 
 use debug_log::log_line;
@@ -70,6 +78,11 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|_argv, _cwd, _event| {}))
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // 日志清理（round 5）：每次启动截断 debug 日志 = 全新日志，并打
+            // 启动标记，时间线从这里对齐。
+            debug_log::truncate();
+            log_line("app started");
+
             // 管理全局状态：Task 7 的 command 从 State 取
             let poller_stop = Arc::new(AtomicBool::new(false));
             app.manage(AppState {

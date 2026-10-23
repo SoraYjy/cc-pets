@@ -245,9 +245,14 @@ pub fn run_poller<E>(
             };
             let len = meta.len();
 
+            // 首次见到该 sid：offset 初始化为当前文件长度——「从现在开始听」，
+            // 不重放历史。否则挂件启动/会话复活时，老多轮会话文件里的全部
+            // turn_duration 行会被重放成 turn-complete/turn-summary 海量刷屏
+            // （Task 6 deferred 重放问题的首启变体，round 5 关闭）。
+            // 文件中途变小的重置逻辑不变（仍是从头重读）。
             let slot = tails
                 .entry(sid.clone())
-                .or_insert_with(|| (Tailer { offset: 0, buf: String::new() }, 0));
+                .or_insert_with(|| (Tailer { offset: len, buf: String::new() }, len));
             if len < slot.1 {
                 // 文件变小（重写/轮转）→ 重置该 sid 的 Tailer 与 offset，从头重读
                 *slot = (Tailer { offset: 0, buf: String::new() }, 0);
@@ -528,16 +533,49 @@ mod poller_tests {
         );
     }
 
+    /// 首启不重放（round 5 新语义）：poller 首次见到已存在的 transcript 从
+    /// 当前文件长度开始听，历史 turn_duration 不产生 turn-complete；
+    /// 之后新增的 turn 正常出事件。
     #[test]
-    fn test_turn_complete_emitted_with_summary() {
+    fn test_first_sight_no_replay_then_append_emits() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = make_fixture(tmp.path(), now_ms());
         let (rx, stop) = spawn_poller(tmp.path());
 
+        // 给足若干 tick 吃掉首扫：历史内容不得重放。
+        // （只非阻塞收干 channel，poller 必须保持运行——后面还要看追加。）
+        thread::sleep(Duration::from_millis(300));
+        let mut drained: Vec<Ev> = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            drained.push(ev);
+        }
+        assert!(
+            !drained.iter().any(|(e, _)| e == "turn-complete"),
+            "history must not be replayed on first sight, got {:?}",
+            drained
+        );
+
+        // 同一 poller 运行期间追加一个新 turn → 应出 turn-complete
+        let appended = concat!(
+            r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"新增摘要"}]}}"#,
+            "\n",
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"test-sid"}"#,
+            "\n",
+        );
+        let proj = tmp
+            .path()
+            .join("projects")
+            .join(encode_cwd(&cwd))
+            .join("test-sid.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&proj).unwrap();
+        use std::io::Write as _;
+        f.write_all(appended.as_bytes()).unwrap();
+        drop(f);
+
         let expected = json!({
             "sessionId": "test-sid",
             "cwd": cwd,
-            "summary": "任务完成摘要",
+            "summary": "新增摘要",
         });
         let hit = wait_for(
             &rx,
@@ -547,7 +585,7 @@ mod poller_tests {
         stop_and_drain(&stop, &rx);
         assert!(
             hit.is_some(),
-            "expected turn-complete event with payload {:?}",
+            "expected turn-complete for appended turn with payload {:?}",
             expected
         );
     }

@@ -168,12 +168,36 @@ void getCurrentWindow().onCloseRequested(() => {
 
 inputEl.focus();
 
+// 全局错误钩子（round 5）：chat 窗没有 debug line，异常只进控制台等于丢——
+// 同步落日志留时间线证据。
+function logLine(text: string): void {
+  void invoke("append_debug", { line: text }).catch(() => {});
+}
+
+window.addEventListener("error", (e) => {
+  console.error("chat window error:", e.message);
+  logLine(`[chat] window error: ${e.message}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  console.error("chat unhandled rejection:", e.reason);
+  logLine(`[chat] unhandled rejection: ${String(e.reason)}`);
+});
+
 // 关闭入口（round 4）：无边框窗没有系统 ×，按钮 / Esc 都走 close()——
 // close() 触发上面的 onCloseRequested → chat_stop，链路保持不变。
+// round 5：close 失败（含 ACL 拒绝）不再静默，具名落日志。
 function closeChat(): void {
-  getCurrentWindow()
-    .close()
-    .catch(() => {});
+  try {
+    getCurrentWindow()
+      .close()
+      .catch((err: unknown) => {
+        console.error("chat close() failed:", err);
+        logLine(`[chat] close() failed: ${String(err)}`);
+      });
+  } catch (err) {
+    console.error("chat close() threw:", err);
+    logLine(`[chat] close() threw: ${String(err)}`);
+  }
 }
 
 closeBtn.addEventListener("click", closeChat);

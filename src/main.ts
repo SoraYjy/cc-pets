@@ -318,6 +318,17 @@ function onClickPet(): void {
   }
 }
 
+// 全局错误钩子（round 5）：未捕获异常/拒绝以前只进控制台、静默丢失——
+// 现在也上 debug line 并落日志，× 关闭失灵这类问题才留得下时间线证据。
+function setupGlobalErrorHooks(): void {
+  window.addEventListener("error", (e) => {
+    showDebug(`window error: ${e.message}`);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    showDebug(`unhandled rejection: ${errorText(e.reason)}`);
+  });
+}
+
 // Attach pointer-based drag/click detection to the whole document.
 // mousedown records origin; mousemove past the threshold hands off to the
 // native window drag (fired exactly once per press); mouseup that never
@@ -381,6 +392,7 @@ async function init(): Promise<void> {
   playAnimation(sessionAnimName);
 }
 
+setupGlobalErrorHooks();
 setupListeners();
 setupChatWindowListeners();
 setupPointerInteractions();
