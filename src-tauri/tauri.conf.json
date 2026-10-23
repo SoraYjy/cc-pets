@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "lynn-tmp",
+  "productName": "Lynn",
   "version": "0.1.0",
   "identifier": "com.sora.lynn",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "lynn-tmp",
+        "title": "Lynn",
         "width": 800,
         "height": 600
       }
