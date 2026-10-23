@@ -8,6 +8,16 @@ export default defineConfig(() => ({
   // serve assets/ as static root so /pet/pet.json and /pet/spritesheet.png are reachable
   publicDir: "assets",
 
+  // two entries: the pet window (index.html) and the chat bubble window (chat.html)
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        chat: "chat.html",
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

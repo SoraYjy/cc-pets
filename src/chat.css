@@ -1,0 +1,135 @@
+/* Chat bubble window: dark translucent panel, small type, pixel-cat adjacent. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+}
+
+#chat {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: rgba(20, 24, 38, 0.92);
+  border-radius: 12px;
+  overflow: hidden;
+  color: #dfe3ee;
+  font-family: ui-sans-serif, -apple-system, "PingFang SC", "Hiragino Sans GB", sans-serif;
+  font-size: 12px;
+}
+
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+#messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+#messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+.bubble {
+  max-width: 85%;
+  padding: 6px 9px;
+  border-radius: 10px;
+  margin-bottom: 6px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubble.user {
+  background: #2e3a5c;
+  color: #eaeefb;
+  margin-left: auto;
+}
+
+.bubble.assistant {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.divider {
+  border-top: 1px dashed rgba(255, 255, 255, 0.15);
+  margin: 8px 0;
+}
+
+.sysline {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  margin: 4px 0;
+}
+
+#composer {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#input {
+  flex: 1;
+  height: 2em; /* single line; Shift+Enter text scrolls within */
+  resize: none;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  padding: 4px 8px;
+  outline: none;
+}
+
+#input:focus {
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+#input:disabled {
+  opacity: 0.5;
+}
+
+#send {
+  border: none;
+  border-radius: 8px;
+  background: #4a5b8c;
+  color: #ffffff;
+  font: inherit;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+#send:hover {
+  background: #5a6da3;
+}
+
+#send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%);
+  max-width: 90%;
+  background: #5c2e35;
+  color: #ffd9dd;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
