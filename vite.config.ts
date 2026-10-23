@@ -5,6 +5,8 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
+  // serve assets/ as static root so /pet/pet.json and /pet/spritesheet.png are reachable
+  publicDir: "assets",
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
