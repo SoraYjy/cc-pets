@@ -1,0 +1,7 @@
+# crates.io 直连在本机被阻，统一走 rsproxy 镜像。
+# 等价于命令行注入：cargo --config 'source.crates-io.replace-with="rsproxy"' --config 'source.rsproxy.registry="sparse+https://rsproxy.cn/index/"'
+[source.crates-io]
+replace-with = "rsproxy"
+
+[source.rsproxy]
+registry = "sparse+https://rsproxy.cn/index/"
