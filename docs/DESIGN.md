@@ -113,6 +113,7 @@ alwaysOnTop: true, skipTaskbar: true, resizable: false
 ```
 
 - `shadow: false` 是 macOS 透明窗口的必须项，否则透明区域会渲染出一圈发黑的阴影；
+- macOS 透明窗口必须 `app.macOSPrivateApi: true`（`shadow:false` 之外的第二必需项）；
 - 主窗口尺寸贴合精灵本体即可，避免引入点击穿透（set_ignore_cursor_events）的复杂度；
 - 气泡对话用第二个 frameless 子窗承载。
 
