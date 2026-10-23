@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { isPermissionGranted, sendNotification } from "@tauri-apps/plugin-notification";
@@ -73,6 +73,12 @@ function setupListeners(): void {
 
   void listen<TurnCompletePayload>("turn-complete", (e) => {
     playAnimation("done");
+    // DESIGN §5.3: the bubble window also shows the result summary. Global
+    // broadcast — the chat window (if open) picks it up as a system line.
+    void emit("turn-summary", {
+      sessionId: e.payload.sessionId,
+      summary: e.payload.summary,
+    }).catch((err: unknown) => console.error("turn-summary emit failed:", err));
     // Query-only: never request permission here (unsigned dev builds may
     // silently not deliver — accepted, observed in Task 9).
     isPermissionGranted()

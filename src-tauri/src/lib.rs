@@ -13,19 +13,12 @@ pub struct AppState {
     pub poller_stop: Arc<AtomicBool>,
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         // single-instance must be registered before all other plugins
         .plugin(tauri_plugin_single_instance::init(|_argv, _cwd, _event| {}))
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 管理全局状态：Task 7 的 command 从 State 取
             let poller_stop = Arc::new(AtomicBool::new(false));
@@ -54,7 +47,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            greet,
             chat::spawn_chat,
             chat::chat_send,
             chat::chat_stop

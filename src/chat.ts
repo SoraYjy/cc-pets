@@ -8,6 +8,14 @@ interface ChatEventPayload {
   text: string;
 }
 
+// The pet window rebroadcasts watcher turn-complete summaries as
+// "turn-summary" { sessionId, summary } so finished (external) Claude
+// sessions show up here too (DESIGN §5.3).
+interface TurnSummaryPayload {
+  sessionId: string;
+  summary: string;
+}
+
 const messagesEl = document.getElementById("messages") as HTMLElement;
 const inputEl = document.getElementById("input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("send") as HTMLButtonElement;
@@ -26,6 +34,17 @@ function systemLine(text: string): void {
   el.textContent = text;
   messagesEl.appendChild(el);
   scrollBottom();
+}
+
+// Turn summaries go to the top of the message area, newest first — they are
+// status notices, not part of the conversation flow.
+function summaryLine(text: string): void {
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  const el = document.createElement("div");
+  el.className = "sysline summary";
+  el.textContent = `[${time}] ${text}`;
+  messagesEl.insertBefore(el, messagesEl.firstChild);
+  messagesEl.scrollTop = 0;
 }
 
 function userBubble(text: string): void {
@@ -116,6 +135,11 @@ void listen<ChatEventPayload>("chat-event", (e) => {
     streamingBubble = null;
     addDivider();
   }
+});
+
+void listen<TurnSummaryPayload>("turn-summary", (e) => {
+  const summary = e.payload.summary ? e.payload.summary : "（无文本摘要）";
+  summaryLine(`✓ 任务完成：${summary}`);
 });
 
 // Stop the claude process when the window closes; fire-and-forget, then let
