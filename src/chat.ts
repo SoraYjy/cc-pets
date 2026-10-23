@@ -19,6 +19,7 @@ interface TurnSummaryPayload {
 const messagesEl = document.getElementById("messages") as HTMLElement;
 const inputEl = document.getElementById("input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("send") as HTMLButtonElement;
+const closeBtn = document.getElementById("close") as HTMLButtonElement;
 
 let sending = false;
 let streamingBubble: HTMLElement | null = null;
@@ -166,6 +167,19 @@ void getCurrentWindow().onCloseRequested(() => {
 });
 
 inputEl.focus();
+
+// 关闭入口（round 4）：无边框窗没有系统 ×，按钮 / Esc 都走 close()——
+// close() 触发上面的 onCloseRequested → chat_stop，链路保持不变。
+function closeChat(): void {
+  getCurrentWindow()
+    .close()
+    .catch(() => {});
+}
+
+closeBtn.addEventListener("click", closeChat);
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "Escape") closeChat();
+});
 
 // Round-3 probe: if the message list ever clears and a NEW loaded line shows
 // up, the window/page was re-created (all JS state reset — investigate the

@@ -47,17 +47,21 @@ function setDebugLine(msg: string, clearAfterMs?: number): void {
   }
 }
 
-// Failure path: console.error + debug line.
+// Failure path: console.error + debug line + persisted log (append_debug is
+// fire-and-forget; logging failures are silently ignored).
 function showDebug(msg: string): void {
   console.error(msg);
   setDebugLine(msg);
+  void invoke("append_debug", { line: msg }).catch(() => {});
 }
 
 // Breadcrumb (fix round 2): informational step marker on the same debug line,
 // no console.error — later crumbs overwrite earlier ones, and success tails
 // pass a clearAfter so the line empties itself once everything worked.
+// Also mirrored into the persisted log.
 function debug(msg: string, clearAfterMs?: number): void {
   setDebugLine(msg, clearAfterMs);
+  void invoke("append_debug", { line: msg }).catch(() => {});
 }
 
 // Best-effort readable text for arbitrary error values (invoke rejections are
@@ -285,6 +289,9 @@ async function openChatWindow(): Promise<void> {
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
+    // round 4: survive macOS Space switches — pet window gets the same via
+    // tauri.conf.json (WindowConfig.visibleOnAllWorkspaces)
+    visibleOnAllWorkspaces: true,
   });
   void chat.once("tauri://created", () => onChatWindowCreated());
   void chat.once("tauri://error", (e) => onChatWindowError(e.payload));

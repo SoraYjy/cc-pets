@@ -6,6 +6,56 @@ use tauri::{Emitter, Manager, RunEvent};
 mod chat;
 mod watcher;
 
+/// debug 日志设施。命令放子模块：crate 根模块里的 `#[tauri::command]` 会
+/// 与 2024 edition 的宏命名空间冲突（E0255），chat.rs 里的命令能编译正是
+/// 因为在子模块。
+mod debug_log {
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    /// 平台日志目录：macOS 固定 `~/Library/Logs`（dirs 6/7 已删 log_dir，
+    /// 这里显式实现等价路径）；其他平台退 data_dir()。
+    #[cfg(target_os = "macos")]
+    fn platform_log_dir() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join("Library").join("Logs"))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn platform_log_dir() -> Option<PathBuf> {
+        dirs::data_dir()
+    }
+
+    /// 日志文件路径：`<log_dir>/lynn-widget/debug.log`；log 目录不可用则退
+    /// `home_dir()/.lynn-widget/debug.log`；home 也没有就放弃写日志。
+    fn path() -> Option<PathBuf> {
+        let base = platform_log_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join(".lynn-widget")))?;
+        Some(base.join("lynn-widget").join("debug.log"))
+    }
+
+    /// 带本地时间戳追加一行到 debug 日志；目录自动创建，写失败静默——
+    /// 日志是诊断设施，不许反向打断主流程。chat.rs 生命周期日志与前端
+    /// debug line（append_debug）共用这一个落盘点。
+    pub(crate) fn log_line(line: &str) {
+        let Some(path) = path() else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "[{stamp}] {line}");
+        }
+    }
+
+    /// 前端 debug line 的持久化通道（前端 fire-and-forget，本端不返回错误）。
+    #[tauri::command]
+    pub fn append_debug(line: String) {
+        log_line(&line);
+    }
+}
+
+use debug_log::log_line;
+
 /// 全局共享状态。Task 7 的 command 从 `State<AppState>` 取 `self_pids`；
 /// `poller_stop` 是轮询线程的唯一停止旗标（退出钩子置真，Task 6 deferred 收口）。
 pub struct AppState {
@@ -49,7 +99,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             chat::spawn_chat,
             chat::chat_send,
-            chat::chat_stop
+            chat::chat_stop,
+            debug_log::append_debug
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

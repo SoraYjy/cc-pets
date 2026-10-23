@@ -174,6 +174,7 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         let mut slot = chat_slot().lock().expect("chat slot poisoned");
         if let Some(p) = slot.as_mut() {
             if p.child.try_wait().map_or(false, |st| st.is_none()) {
+                crate::log_line("chat already running; reusing (no respawn)");
                 return Ok("already running".to_string());
             }
         }
@@ -190,6 +191,7 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
     let stdout = child.stdout.take();
     let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
         // 半启动失败：不留僵尸 claude
+        crate::log_line("chat spawn aborted: claude spawned without piped stdio");
         let _ = child.kill();
         let _ = child.wait();
         return Err("claude spawned without piped stdio".to_string());
@@ -241,24 +243,34 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
                 ChatEvent::Ignored => {}
             }
         }
+        // 读线程 EOF：claude 进程已退出
+        crate::log_line(&format!("chat process exited (pid={pid}, stdout EOF)"));
         // 自然退出清理：仅当槽里仍是自己这个实例才收走（防 spawn_chat
         // 换新竞态下误收新 proc）；槽已空 = chat_stop 已收殓，均为幂等 no-op。
         let mut slot = chat_slot().lock().expect("chat slot poisoned");
         if slot.as_ref().map(|p| p.child.id()) == Some(pid) {
             if let Some(mut p) = slot.take() {
-                let _ = p.child.wait(); // 兜底收尸，防僵尸
+                // 兜底收尸，防僵尸；拿得到退出码就记下
+                if let Ok(st) = p.child.wait() {
+                    if let Some(code) = st.code() {
+                        crate::log_line(&format!("chat process exit code={code}"));
+                    }
+                }
             }
         }
         drop(slot);
         pids.lock().expect("self_pids poisoned").remove(&pid);
     });
 
+    crate::log_line(&format!("chat spawned (pid={pid})"));
     Ok(pid.to_string())
 }
 
 /// 向常驻 claude 写一条 user 消息（双向 stream-json 协议）。
 #[tauri::command]
 pub fn chat_send(text: String) -> Result<(), String> {
+    // 只记长度不记内容：日志落盘的是诊断信息，不是对话记录
+    crate::log_line(&format!("chat_send (len={})", text.len()));
     let guard = chat_slot().lock().expect("chat slot poisoned");
     let p = guard.as_ref().ok_or_else(|| "no chat process".to_string())?;
     let mut stdin_guard = p.stdin.lock().expect("stdin poisoned");
@@ -277,6 +289,7 @@ pub fn chat_send(text: String) -> Result<(), String> {
 /// 停止常驻 claude 对话进程（幂等：无实例也返回 Ok）。
 #[tauri::command]
 pub fn chat_stop(state: State<'_, AppState>) -> Result<(), String> {
+    crate::log_line("chat_stop");
     stop_internal(&state)
 }
 

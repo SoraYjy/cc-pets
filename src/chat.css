@@ -13,6 +13,7 @@ body {
 }
 
 #chat {
+  position: relative; /* anchors the floating close button */
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -22,6 +23,26 @@ body {
   color: #dfe3ee;
   font-family: ui-sans-serif, -apple-system, "PingFang SC", "Hiragino Sans GB", sans-serif;
   font-size: 12px;
+}
+
+/* 无边框窗的唯一关闭入口（round 4）：右上半透明白 ×，hover 变亮。
+   Esc 同样可关（见 chat.ts）。 */
+#close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 10;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+#close:hover {
+  color: rgba(255, 255, 255, 0.9);
 }
 
 #messages {
