@@ -119,11 +119,17 @@ impl Tailer {
         data.extend_from_slice(chunk);
 
         let mut lines = Vec::new();
-        if let Some(last_nl) = data.iter().rposition(|&b| b == b'\n') {
-            for line in data[..last_nl].split(|&b| b == b'\n') {
-                lines.push(String::from_utf8_lossy(line).into_owned());
+        match data.iter().rposition(|&b| b == b'\n') {
+            Some(last_nl) => {
+                for line in data[..last_nl].split(|&b| b == b'\n') {
+                    lines.push(String::from_utf8_lossy(line).into_owned());
+                }
+                self.buf = String::from_utf8_lossy(&data[last_nl + 1..]).into_owned();
             }
-            self.buf = String::from_utf8_lossy(&data[last_nl + 1..]).into_owned();
+            // buf+chunk 全程无换行：整块内容留存 buf，等待后续 chunk 凑齐
+            None => {
+                self.buf = String::from_utf8_lossy(&data).into_owned();
+            }
         }
         lines
     }
@@ -157,6 +163,22 @@ mod tests {
         let lines = t.feed(b"tial\nline2\n");
         assert_eq!(lines, vec!["partial".to_string(), "line2".to_string()]);
         assert_eq!(t.buf, "");
+    }
+
+    #[test]
+    fn test_no_newline_chunk_retained() {
+        let mut t = Tailer {
+            offset: 0,
+            buf: String::new(),
+        };
+        // buf 空 + chunk 无换行 → 整块留存，不产出行
+        assert_eq!(t.feed(b"par"), Vec::<String>::new());
+        assert_eq!(t.buf, "par");
+        // 残行 + 带换行 chunk → 凑齐出帧
+        assert_eq!(t.feed(b"tial\n"), vec!["partial".to_string()]);
+        // 出帧后 buf 空，再喂无换行 chunk → 继续留存
+        assert_eq!(t.feed(b"line2"), Vec::<String>::new());
+        assert_eq!(t.buf, "line2");
     }
 
     #[test]
