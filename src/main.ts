@@ -2,7 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { isPermissionGranted, sendNotification } from "@tauri-apps/plugin-notification";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { frameAt, loadPet, offsetFor, type AnimationDef } from "./sprite";
 
 const PET_BASE = "/pet";
@@ -18,6 +22,53 @@ const CHAT_LABEL = "chat";
 const CHAT_WIDTH = 340;
 const CHAT_HEIGHT = 420;
 const CHAT_GAP_PX = 8; // clearance between pet and bubble
+
+// ===== Debug line =====
+
+// Diagnostic facility (acceptance fix): failure paths that used to be
+// console-only — or swallowed entirely — land on a single red line under the
+// pet (#debug-line in index.html), so chat-window / notification triage works
+// without devtools. Successes flash through too and clear themselves.
+let debugClearTimer: ReturnType<typeof setTimeout> | undefined;
+
+function setDebugLine(msg: string, clearAfterMs?: number): void {
+  if (debugClearTimer !== undefined) {
+    clearTimeout(debugClearTimer);
+    debugClearTimer = undefined;
+  }
+  const el = document.getElementById("debug-line");
+  if (el) el.textContent = msg;
+  if (clearAfterMs !== undefined) {
+    debugClearTimer = setTimeout(() => {
+      debugClearTimer = undefined;
+      const el = document.getElementById("debug-line");
+      if (el) el.textContent = "";
+    }, clearAfterMs);
+  }
+}
+
+// Failure path: console.error + debug line.
+function showDebug(msg: string): void {
+  console.error(msg);
+  setDebugLine(msg);
+}
+
+// Best-effort readable text for arbitrary error values (invoke rejections are
+// usually plain strings, JS failures are Error objects).
+function errorText(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object") {
+    const msg = (err as { message?: unknown }).message;
+    if (typeof msg === "string") return msg;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
+}
 
 // ===== Sprite player =====
 
@@ -79,28 +130,65 @@ function setupListeners(): void {
       sessionId: e.payload.sessionId,
       summary: e.payload.summary,
     }).catch((err: unknown) => console.error("turn-summary emit failed:", err));
-    // Query-only: never request permission here (unsigned dev builds may
-    // silently not deliver — accepted, observed in Task 9).
-    isPermissionGranted()
-      .then((granted) => {
-        if (!granted) return;
+    // macOS gates notifications behind a one-time system authorization:
+    // query first, then request when missing. The first turn-complete after
+    // install therefore pops the system dialog — expected (acceptance fix:
+    // this used to be query-only and silently skipped on denied permission).
+    void (async () => {
+      let granted = await isPermissionGranted();
+      if (!granted) {
+        granted = (await requestPermission()) === "granted";
+      }
+      if (granted) {
         sendNotification({
           title: "任务完成",
           body: e.payload.summary ? e.payload.summary : "查看 Claude Code 终端",
         });
-      })
-      .catch((err) => console.error("notification failed:", err));
+      } else {
+        showDebug("通知权限未授予");
+      }
+    })().catch((err: unknown) => showDebug(`notification failed: ${errorText(err)}`));
   });
 }
 
 // ===== Chat bubble window =====
+
+// `new WebviewWindow` reports its outcome via `tauri://created` /
+// `tauri://error`. In the installed @tauri-apps/api these two names are
+// "local" events: the constructor dispatches them ONLY to handlers registered
+// on the instance, and if none is registered the outcome is dropped silently —
+// the swallowed-failure defect from acceptance. So the instance listeners are
+// registered immediately after construction (their registration is
+// synchronous, before the async IPC can settle). Attribution uses a
+// creation-in-flight flag because `tauri://created` carries no payload and
+// `tauri://error` carries the raw error — there is no `payload.label` to
+// filter on. The global listeners below are belt-and-braces for any broadcast
+// variant of these events; the flag dedupes against the instance listeners.
+let chatCreateInFlight = false;
+
+function onChatWindowCreated(): void {
+  if (!chatCreateInFlight) return;
+  chatCreateInFlight = false;
+  setDebugLine("chat window created", 5000);
+}
+
+function onChatWindowError(payload: unknown): void {
+  if (!chatCreateInFlight) return;
+  chatCreateInFlight = false;
+  showDebug(`chat window error: ${errorText(payload)}`);
+}
+
+function setupChatWindowListeners(): void {
+  void listen("tauri://created", () => onChatWindowCreated());
+  void listen("tauri://error", (e) => onChatWindowError(e.payload));
+}
 
 async function openChatWindow(): Promise<void> {
   const existing = await WebviewWindow.getByLabel(CHAT_LABEL);
   if (existing) {
     await existing
       .setFocus()
-      .catch((err: unknown) => console.error("chat setFocus failed:", err));
+      .catch((err: unknown) => showDebug(`chat setFocus failed: ${errorText(err)}`));
     return;
   }
 
@@ -128,6 +216,10 @@ async function openChatWindow(): Promise<void> {
     y = Math.min(Math.max(y, mon.y), mon.y + size.height - CHAT_HEIGHT);
   }
 
+  // Outcome listeners are in place around the constructor (see above): the
+  // instance handlers catch the api's local dispatch, the global handlers any
+  // broadcast variant. Either way the outcome surfaces on the debug line.
+  chatCreateInFlight = true;
   const chat = new WebviewWindow(CHAT_LABEL, {
     url: "chat.html",
     x,
@@ -140,15 +232,24 @@ async function openChatWindow(): Promise<void> {
     skipTaskbar: true,
     resizable: false,
   });
-  chat.once("tauri://error", (e) => console.error("chat window failed to open:", e.payload));
+  void chat.once("tauri://created", () => onChatWindowCreated());
+  void chat.once("tauri://error", (e) => onChatWindowError(e.payload));
 }
 
 // ===== Click/drag =====
 
 function onClickPet(): void {
-  playAnimation("wave");
-  void openChatWindow();
-  invoke("spawn_chat").catch((err: unknown) => console.error("spawn_chat failed:", err));
+  try {
+    playAnimation("wave");
+    openChatWindow().catch((err: unknown) =>
+      showDebug(`openChatWindow failed: ${errorText(err)}`),
+    );
+    invoke("spawn_chat").catch((err: unknown) =>
+      showDebug(`spawn_chat failed: ${errorText(err)}`),
+    );
+  } catch (err) {
+    showDebug(`onClickPet failed: ${errorText(err)}`);
+  }
 }
 
 // Attach pointer-based drag/click detection to the whole document.
@@ -215,5 +316,6 @@ async function init(): Promise<void> {
 }
 
 setupListeners();
+setupChatWindowListeners();
 setupPointerInteractions();
-init().catch((err) => console.error("failed to load pet:", err));
+init().catch((err) => showDebug(`failed to load pet: ${errorText(err)}`));

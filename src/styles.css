@@ -15,3 +15,16 @@ body {
   top: 0;
   left: 0;
 }
+
+#debug-line {
+  /* Diagnostic line (see showDebug in main.ts): a single red line 8px below
+     the pet cell, filled by main.ts and kept to one line. */
+  position: fixed;
+  top: 216px; /* pet cell 208px + 8px gap */
+  left: 0;
+  max-width: 100vw;
+  font-size: 10px;
+  color: red;
+  white-space: nowrap;
+  overflow: hidden;
+}
