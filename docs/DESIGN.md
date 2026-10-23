@@ -69,7 +69,7 @@ Electron 作为纯 TS 团队的备选方案保留。
 
 **hooks（Stop / Notification / SessionEnd）不推荐首版使用**：需要侵入用户 Claude 配置，且拿到事件后结果仍要回读 jsonl，收益不抵成本。
 
-**大文件防护**：transcript 可达 50MB+，绝不做全量重读；检测到文件 size 变小（被截断/重写）则重置 offset 从头读。
+**大文件防护**：transcript 可达 50MB+，绝不做全量重读；检测到文件 size 变小（被截断/重写）则重置 offset 从头读。watcher 首次见到某 session 时，offset 初始化为当前文件长度——从现在开始听，不重放历史。
 
 ## 2. 自有对话：spawn Claude Code 运行时
 
@@ -91,7 +91,8 @@ spawn:
 ```
 
 - **多轮对话** = 进程常驻，继续向 stdin 写入即可；
-- **跨重启续聊** = 持久化 system 事件里的 `session_id`，重启后 `--resume` 接上。
+- **跨重启续聊** = 持久化 system 事件里的 `session_id`，重启后 `--resume` 接上；
+- **点击复用** = 点击宠物时若槽内已有活进程则直接复用（already running），不打断进行中对话；仅槽内进程已死或无进程时才 spawn。
 
 **三个实测坑：**
 
