@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { decideDoneFallback, type ChatEntry } from "./history";
 
 // Backend chat.rs emits { kind: "init" | "text" | "done", text }.
 interface ChatEventPayload {
@@ -65,19 +66,24 @@ function summaryLine(text: string): void {
   messagesEl.scrollTop = 0;
 }
 
-function userBubble(text: string): void {
+// Shared bubble factory (extracted so the history re-render and the done
+// fallback reuse the exact same user/assistant markup). textContent only.
+function makeBubble(kind: "user" | "assistant", text: string): HTMLElement {
   const el = document.createElement("div");
-  el.className = "bubble user";
+  el.className = `bubble ${kind}`;
   el.textContent = text;
-  messagesEl.appendChild(el);
+  return el;
+}
+
+function userBubble(text: string): void {
+  messagesEl.appendChild(makeBubble("user", text));
   scrollBottom();
 }
 
 // Current turn's assistant bubble; created on first streamed text of the turn.
 function streamingBubbleFor(): HTMLElement {
   if (!streamingBubble) {
-    const el = document.createElement("div");
-    el.className = "bubble assistant";
+    const el = makeBubble("assistant", "");
     messagesEl.appendChild(el);
     streamingBubble = el;
   }
@@ -113,6 +119,12 @@ async function send(): Promise<void> {
   inputEl.disabled = true;
   sendBtn.disabled = true;
   userBubble(text); // local echo before the round-trip
+  // v1.1: report the send to the pet window's history log. Fire-and-forget —
+  // a bookkeeping failure must not block the actual send (logged as evidence).
+  void emit("chat-user-message", { text }).catch((err: unknown) => {
+    console.error("chat-user-message emit failed:", err);
+    logLine(`[chat] chat-user-message emit failed: ${String(err)}`);
+  });
   inputEl.value = "";
   try {
     await invoke("chat_send", { text });
@@ -147,12 +159,47 @@ void listen<ChatEventPayload>("chat-event", (e) => {
     scrollBottom();
     return;
   }
-  // done → close the current assistant bubble, separate the next turn.
-  // (The result text itself was already streamed via "text" events.)
-  if (streamingBubble) {
-    streamingBubble = null;
-    addDivider();
+  // done → close the turn. The result normally already streamed into an open
+  // bubble; with no open bubble and a non-empty done text (pure tool turn:
+  // nothing streamed), materialize the text as an assistant bubble instead
+  // (v1.1 兜底). The divider is inserted on EVERY done now, opened or not.
+  const fallback = decideDoneFallback(e.payload.text, streamingBubble !== null);
+  if (fallback === "bubble") {
+    messagesEl.appendChild(makeBubble("assistant", e.payload.text));
+    scrollBottom();
   }
+  streamingBubble = null;
+  addDivider();
+});
+
+// ===== History (v1.1) =====
+
+// The pet window owns the log and pushes it when this window is created (plus
+// bounded catch-ups — see main.ts emitChatHistory). Rendering is
+// clear-then-redraw, so duplicate deliveries are harmless.
+interface ChatHistoryPayload {
+  entries: ChatEntry[];
+}
+
+function renderHistory(entries: ChatEntry[]): void {
+  messagesEl.textContent = ""; // clears all children
+  streamingBubble = null; // its element was just removed from the DOM
+  connectedLine = null; // stale reference; the next init makes a fresh line
+  for (const entry of entries) {
+    if (entry.role === "system") {
+      const el = document.createElement("div");
+      el.className = "sysline";
+      el.textContent = `${entry.text} @ ${entry.ts}`;
+      messagesEl.appendChild(el);
+    } else {
+      messagesEl.appendChild(makeBubble(entry.role, entry.text));
+    }
+  }
+  scrollBottom();
+}
+
+void listen<ChatHistoryPayload>("chat-history", (e) => {
+  renderHistory(e.payload.entries);
 });
 
 void listen<TurnSummaryPayload>("turn-summary", (e) => {

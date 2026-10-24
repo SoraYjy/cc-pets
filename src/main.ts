@@ -7,6 +7,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { pushCapped, type ChatEntry } from "./history";
 import { frameAt, loadPet, offsetFor, type AnimationDef } from "./sprite";
 
 const PET_BASE = "/pet";
@@ -141,6 +142,12 @@ function setupListeners(): void {
       sessionId: e.payload.sessionId,
       summary: e.payload.summary,
     }).catch((err: unknown) => console.error("turn-summary emit failed:", err));
+    // v1.1: mirror the finished turn into the history log (same ✓ wording the
+    // chat window's summary line uses).
+    recordEntry(
+      "system",
+      `✓ 任务完成：${e.payload.summary ? e.payload.summary : "（无文本摘要）"}`,
+    );
     // macOS gates notifications behind a one-time system authorization:
     // query first, then request when missing. The first turn-complete after
     // install therefore pops the system dialog — expected (acceptance fix:
@@ -162,6 +169,82 @@ function setupListeners(): void {
   });
 }
 
+// ===== Chat history log (v1.1, A 档) =====
+
+// The pet window owns the in-memory conversation log so it survives bubble
+// window close/reopen; quitting the app clears it. Recording points: the chat
+// window reports its own sends via "chat-user-message"; the backend
+// "chat-event" stream and watcher turn summaries are mirrored here.
+const CHAT_LOG_CAP = 200;
+
+interface ChatUserMessagePayload {
+  text: string;
+}
+
+// Same wire shape chat.rs emits (chat.ts declares its own copy).
+interface ChatEventPayload {
+  kind: "init" | "text" | "done";
+  text: string;
+}
+
+const chatLog: ChatEntry[] = [];
+let pendingAssistant = ""; // streamed "text" fragments of the current turn
+
+function recordEntry(role: ChatEntry["role"], text: string): void {
+  pushCapped(
+    chatLog,
+    { role, text, ts: new Date().toLocaleTimeString() },
+    CHAT_LOG_CAP,
+  );
+}
+
+function setupChatLog(): void {
+  // ① the chat window reports each send (it renders its own local echo).
+  void listen<ChatUserMessagePayload>("chat-user-message", (e) => {
+    recordEntry("user", e.payload.text);
+  });
+
+  // ② mirror the chat-event stream: accumulate "text" fragments, finalize on
+  // "done" — accumulated stream wins; when it is empty fall back to done.text
+  // (a pure tool turn streams nothing but carries the result). "init" is a
+  // system entry.
+  void listen<ChatEventPayload>("chat-event", (e) => {
+    if (e.payload.kind === "init") {
+      recordEntry("system", "会话已连接");
+      return;
+    }
+    if (e.payload.kind === "text") {
+      pendingAssistant += e.payload.text;
+      return;
+    }
+    if (pendingAssistant !== "") {
+      recordEntry("assistant", pendingAssistant);
+    } else if (e.payload.text !== "") {
+      recordEntry("assistant", e.payload.text);
+    }
+    pendingAssistant = "";
+  });
+}
+
+// ③ Push the log into a freshly created chat window. Timing: the api dispatch
+// of `tauri://created` fires when the create command RESOLVES — the webview
+// exists but its page has not booted yet, so the chat window's
+// listen("chat-history") is not registered and a single emit would be dropped
+// into an empty page context. The chat side renders clear-then-redraw
+// (idempotent), so bounded catch-up re-emits are harmless duplicates: the
+// first lands at the spec'd moment, a later one lands once the page listens.
+function emitChatHistory(): void {
+  const push = (): void => {
+    emit("chat-history", { entries: [...chatLog] }).catch((err: unknown) =>
+      console.error("chat-history emit failed:", err),
+    );
+  };
+  push();
+  for (const delayMs of [500, 1500, 3000]) {
+    setTimeout(push, delayMs);
+  }
+}
+
 // ===== Chat bubble window =====
 
 // `new WebviewWindow` reports its outcome via `tauri://created` /
@@ -181,6 +264,7 @@ function onChatWindowCreated(): void {
   if (!chatCreateInFlight) return;
   chatCreateInFlight = false;
   setDebugLine("chat window created", 5000);
+  emitChatHistory(); // v1.1: only the creation path pushes (setFocus path skips)
 }
 
 function onChatWindowError(payload: unknown): void {
@@ -394,6 +478,7 @@ async function init(): Promise<void> {
 
 setupGlobalErrorHooks();
 setupListeners();
+setupChatLog();
 setupChatWindowListeners();
 setupPointerInteractions();
 init().catch((err) => showDebug(`failed to load pet: ${errorText(err)}`));
