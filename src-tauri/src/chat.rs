@@ -11,7 +11,10 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 // ===== 纯逻辑 =====
@@ -171,6 +174,17 @@ pub struct ChatProc {
     pub stdin: Arc<Mutex<ChildStdin>>,
     pub session_id: Mutex<Option<String>>,
     pub stderr_ring: Arc<StderrRing>,
+    /// stderr 读线程句柄：spawn 时存入备查；不在此 join——join 无界等待，
+    /// 有界收尾由 [`log_chat_exit`] 经 `stderr_done` 信号完成。本字段按
+    /// 设计只写不读（当前无消费点，留作诊断与后续有界 join 的挂点），
+    /// dead_code 检查在此放行。
+    #[allow(dead_code)]
+    pub stderr_join: Option<JoinHandle<()>>,
+    /// stderr 线程退出信号接收端：收殓方快照环形缓冲前 recv_timeout 等
+    /// 此信号（最多 [`STDERR_TAIL_WAIT`]），保证残行尽量收齐。包 Mutex
+    /// 是为满足槽内 `Arc<ChatProc>` 的 Sync 要求（Receiver 本身非 Sync；
+    /// 实际消费方同一时刻只有一个——持有 proc 的收殓方）。
+    pub stderr_done: Mutex<mpsc::Receiver<()>>,
 }
 
 /// 全局唯一 chat 实例槽（存 `Arc<ChatProc>`：chat_send 取 clone 后即可
@@ -187,26 +201,48 @@ fn chat_slot() -> &'static Mutex<Option<Arc<ChatProc>>> {
     CHAT.get_or_init(|| Mutex::new(None))
 }
 
+/// 退出落盘前等待 stderr 线程收尾的上限（有界等待，防收殓方被卡死）。
+const STDERR_TAIL_WAIT: Duration = Duration::from_millis(200);
+
 /// 进程退出统一落盘点（EOF 收尸与 chat_stop 两处共用）：先记退出码
-/// （信号死/拿不到写 unknown），再把 stderr 环形缓冲逐行落盘（前缀
-/// `[stderr] `，至多 cap=50 行）。
-fn log_chat_exit(ring: &StderrRing, status: Option<ExitStatus>) {
+/// （信号死/拿不到写 unknown）；随后对 stderr 线程做有界收尾等待——
+/// kill+wait 与 stdout EOF 都不保证 stderr 线程已把残行 push 进环，收不到
+/// 完成信号则快照现状并追加一行 `[stderr] (tail may be truncated)`，如实
+/// 声明尾行可能缺失；最后把环形缓冲逐行落盘（前缀 `[stderr] `，至多
+/// cap=50 行）。
+fn log_chat_exit(proc: &ChatProc, status: Option<ExitStatus>) {
     let code = status
         .and_then(|s| s.code())
         .map(|c| c.to_string())
         .unwrap_or_else(|| "unknown".to_string());
     crate::log_line(&format!("chat process exited (code={code})"));
-    for l in ring.snapshot() {
+    // 有界等待 stderr 线程收尾。Ok = 线程发来完成信号；Disconnected =
+    // sender 已 drop（无 stderr 线程，或线程未发信号即终止）——均视为
+    // 收尾；Timeout = 200ms 内未收尾，尾行可能缺失。
+    let truncated = match proc
+        .stderr_done
+        .lock()
+        .expect("stderr done poisoned")
+        .recv_timeout(STDERR_TAIL_WAIT)
+    {
+        Ok(()) | Err(RecvTimeoutError::Disconnected) => false,
+        Err(RecvTimeoutError::Timeout) => true,
+    };
+    for l in proc.stderr_ring.snapshot() {
         crate::log_line(&format!("[stderr] {l}"));
+    }
+    if truncated {
+        crate::log_line("[stderr] (tail may be truncated)");
     }
 }
 
 /// stop 的内部实现（command 与退出钩子共用）：短暂持锁取走实例，锁外
 /// SIGKILL → `child.wait()` 收尸（SIGKILL 后立即返回，即「有界等待」的
-/// 形态）→ 落退出码与 stderr 缓冲（[`log_chat_exit`]，此时收殓方仍持
-/// proc，stderr 线程已随 EOF/管道关闭结束，快照完整）→ self_pids 移除。
-/// stdin 不再需要「先置 None 语义关闭」的旧舞步：Arc 结构下 SIGKILL 即刻
-/// 生效，proc 连同 stdin 句柄随 take 出槽后自然释放。
+/// 形态）→ 落退出码与 stderr 缓冲（[`log_chat_exit`]：快照前对 stderr
+/// 线程做最多 200ms 的有界收尾等待——kill+wait 只保证进程死，不保证
+/// stderr 线程已写完残行；超时则快照现状并标注尾行可能截断）→
+/// self_pids 移除。stdin 不再需要「先置 None 语义关闭」的旧舞步：Arc
+/// 结构下 SIGKILL 即刻生效，proc 连同 stdin 句柄随 take 出槽后自然释放。
 pub fn stop_internal(state: &AppState) -> Result<(), String> {
     let taken = chat_slot().lock().expect("chat slot poisoned").take();
     if let Some(p) = taken {
@@ -217,7 +253,7 @@ pub fn stop_internal(state: &AppState) -> Result<(), String> {
             let _ = c.kill();
             (pid, c.wait().ok())
         };
-        log_chat_exit(&p.stderr_ring, status);
+        log_chat_exit(&p, status);
         state
             .self_pids
             .lock()
@@ -276,18 +312,24 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         .insert(pid);
 
     // stderr 环形缓冲（cap=50）：读线程与 ChatProc 各持一份 Arc（同一
-    // 实例），进程退出时由收殓方（EOF 收尸 / chat_stop）快照落盘。
+    // 实例），进程退出时由收殓方（EOF 收尸 / chat_stop）快照落盘。读线程
+    // 退出前发 done 信号；收殓方 kill/wait 或见 stdout EOF 都不构成 stderr
+    // 收尾保证，故快照前以 recv_timeout 有界等待该信号（log_chat_exit）。
     let ring = Arc::new(StderrRing::new(50));
+    let (err_tx, err_rx) = mpsc::channel::<()>();
+    let mut stderr_join = None;
     if let Some(stderr) = stderr {
         let ring_for_stderr = Arc::clone(&ring);
-        std::thread::spawn(move || {
+        stderr_join = Some(std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 match line {
                     Ok(l) => ring_for_stderr.push(&l),
                     Err(_) => break,
                 }
             }
-        });
+            // 收尾信号；send 失败仅意味着接收端已 drop（无人等待）
+            let _ = err_tx.send(());
+        }));
     }
 
     *chat_slot().lock().expect("chat slot poisoned") = Some(Arc::new(ChatProc {
@@ -295,6 +337,8 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         stdin: Arc::new(Mutex::new(stdin)),
         session_id: Mutex::new(None),
         stderr_ring: Arc::clone(&ring),
+        stderr_join,
+        stderr_done: Mutex::new(err_rx),
     }));
 
     // 读线程：逐行解析 stdout → emit；Done 不杀进程（保持多轮）；
@@ -342,10 +386,10 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
             == Some(pid)
         {
             if let Some(p) = slot.take() {
-                // 兜底收尸防僵尸 + 落退出码与 stderr 缓冲（ring 与
-                // p.stderr_ring 是同一实例，用读线程这份绕开借用）
+                // 兜底收尸防僵尸 + 落退出码与 stderr 缓冲（含对 stderr
+                // 线程的有界收尾等待，见 log_chat_exit）
                 let status = p.child.lock().expect("chat child poisoned").wait().ok();
-                log_chat_exit(&ring, status);
+                log_chat_exit(&p, status);
             }
         }
         drop(slot);
