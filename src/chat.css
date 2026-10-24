@@ -1,7 +1,31 @@
-/* Chat bubble window: dark translucent panel, small type, pixel-cat adjacent. */
+/* Chat bubble window — three selectable themes + window opacity (v1.1).
+   Geometry/colors are ported item-by-item from assets/chat-style-mockup.html:
+   - theme-c 贴纸手账 (light cream, outlined, default)
+   - theme-a 漫画气泡 (dark, tailed assistant bubbles + sprite avatar)
+   - theme-b 极简 IM (flat dark, pill bubbles)
+   The window background multiplies --win-alpha (0.3–1.0) so the settings
+   slider fades the whole window smoothly and continuously. */
 
 * {
   box-sizing: border-box;
+}
+
+:root {
+  --win-alpha: 0.92; /* driven by the settings slider via chat.ts */
+}
+
+/* Per-theme window base color (mockup: C #fff8ec / A rgb(24,28,44) / B #1b2030),
+   as raw RGB triplets so the alpha can ride along in rgba(). */
+body.theme-c {
+  --win-bg-rgb: 255, 248, 236;
+}
+
+body.theme-a {
+  --win-bg-rgb: 24, 28, 44;
+}
+
+body.theme-b {
+  --win-bg-rgb: 27, 32, 48;
 }
 
 html,
@@ -13,24 +37,36 @@ body {
 }
 
 #chat {
-  position: relative; /* anchors the floating close button */
+  position: relative; /* anchors the floating header buttons + settings panel */
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: rgba(20, 24, 38, 0.92);
-  border-radius: 12px;
+  background: rgba(var(--win-bg-rgb, 255, 248, 236), var(--win-alpha, 0.92));
+  border-radius: 14px;
   overflow: hidden;
-  color: #dfe3ee;
   font-family: ui-sans-serif, -apple-system, "PingFang SC", "Hiragino Sans GB", sans-serif;
   font-size: 12px;
 }
 
-/* 无边框窗的唯一关闭入口（round 4）：右上半透明白 ×，hover 变亮。
-   Esc 同样可关（见 chat.ts）。 */
+/* Window ink + frame per theme (mockup .win / .head colors) */
+body.theme-c #chat {
+  color: #3a4a6b;
+}
+
+body.theme-a #chat {
+  color: #cfd6e8;
+  border: 1px solid rgba(143, 168, 204, 0.25);
+}
+
+body.theme-b #chat {
+  color: #e6eaf4;
+}
+
+/* Header buttons: ⚙ sits left of ×; both float over the messages area. */
+#settings-toggle,
 #close {
   position: absolute;
   top: 4px;
-  right: 6px;
   z-index: 10;
   border: none;
   background: transparent;
@@ -41,8 +77,27 @@ body {
   cursor: pointer;
 }
 
+#settings-toggle {
+  right: 30px;
+}
+
+#close {
+  right: 6px;
+}
+
+#settings-toggle:hover,
 #close:hover {
   color: rgba(255, 255, 255, 0.9);
+}
+
+body.theme-c #settings-toggle,
+body.theme-c #close {
+  color: rgba(58, 74, 107, 0.45);
+}
+
+body.theme-c #settings-toggle:hover,
+body.theme-c #close:hover {
+  color: #3a4a6b;
 }
 
 #messages {
@@ -60,12 +115,34 @@ body {
   border-radius: 3px;
 }
 
+body.theme-c #messages::-webkit-scrollbar-thumb {
+  background: rgba(58, 74, 107, 0.25);
+}
+
+/* theme-c 手账底纹：only the ruled lines live here (transparent base) so the
+   window alpha keeps showing through (mockup .C .msgs). */
+body.theme-c #messages {
+  padding-left: 12px;
+  padding-right: 12px;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0 23px,
+    rgba(58, 74, 107, 0.07) 23px 24px
+  );
+}
+
+/* theme-a: leave room to the left of assistant bubbles for the sprite avatar */
+body.theme-a #messages {
+  padding-left: 50px;
+}
+
 .bubble {
-  max-width: 85%;
-  padding: 6px 9px;
+  max-width: 78%;
+  padding: 8px 11px;
   border-radius: 10px;
   margin-bottom: 6px;
-  line-height: 1.5;
+  font-size: 12.5px;
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -80,9 +157,108 @@ body {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* ===== theme-a 漫画气泡风（mockup variant A） ===== */
+
+body.theme-a .bubble.user {
+  background: #7c9cd0;
+  color: #ffffff;
+  border-radius: 14px 4px 14px 14px;
+}
+
+body.theme-a .bubble.assistant {
+  position: relative;
+  background: #e9edf5;
+  color: #2b2b3a;
+  border-radius: 4px 14px 14px 14px;
+  margin-left: 44px; /* avatar clearance (see #messages padding-left) */
+}
+
+/* 尾巴指向头像（mockup .A .msg.assistant .bubble::before） */
+body.theme-a .bubble.assistant::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  bottom: 6px;
+  border: 7px solid transparent;
+  border-right-color: #e9edf5;
+  border-left: 0;
+}
+
+/* Lynn 头像：spritesheet 裁 idle 第一帧（照 mockup .avatar 写法） */
+body.theme-a .bubble.assistant::after {
+  content: "";
+  position: absolute;
+  left: -44px;
+  bottom: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #e9edf5 url("/pet/spritesheet.png") 0 -4px / 236px 128px no-repeat;
+  image-rendering: pixelated;
+}
+
+/* ===== theme-b 极简 IM 风（mockup variant B） ===== */
+
+body.theme-b .bubble {
+  border-radius: 16px;
+}
+
+body.theme-b .bubble.assistant {
+  background: #2c3140;
+  color: #e6eaf4;
+}
+
+body.theme-b .bubble.user {
+  background: #4a7dc9;
+  color: #ffffff;
+}
+
+/* ===== theme-c 贴纸手账风（mockup variant C） ===== */
+
+body.theme-c .bubble.user {
+  background: #cfe0ff;
+  color: #2b2b3a;
+  border: 2px solid #3a4a6b;
+  border-radius: 14px 4px 14px 14px;
+  box-shadow: -2px 2px 0 rgba(58, 74, 107, 0.25);
+  transform: rotate(0.4deg);
+}
+
+body.theme-c .bubble.assistant {
+  position: relative;
+  background: #ffffff;
+  color: #2b2b3a;
+  border: 2px solid #3a4a6b;
+  border-radius: 4px 14px 14px 14px;
+  box-shadow: 2px 2px 0 rgba(58, 74, 107, 0.25);
+  transform: rotate(-0.4deg);
+}
+
+body.theme-c .bubble.assistant::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  bottom: 5px;
+  border: 8px solid transparent;
+  border-right-color: #3a4a6b;
+  border-left: 0;
+}
+
 .divider {
   border-top: 1px dashed rgba(255, 255, 255, 0.15);
   margin: 8px 0;
+}
+
+body.theme-a .divider {
+  border-top-color: rgba(143, 168, 204, 0.25);
+}
+
+body.theme-b .divider {
+  border-top-color: rgba(255, 255, 255, 0.12);
+}
+
+body.theme-c .divider {
+  border-top: 1.5px dashed rgba(184, 148, 90, 0.7);
 }
 
 .sysline {
@@ -90,6 +266,32 @@ body {
   color: rgba(255, 255, 255, 0.45);
   font-size: 11px;
   margin: 4px 0;
+}
+
+body.theme-a .sysline {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* theme-b 系统行成胶囊（mockup .B .sys） */
+body.theme-b .sysline {
+  color: #aab3c8;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 3px 10px;
+  width: fit-content;
+  margin: 4px auto;
+}
+
+/* theme-c 系统行成虚线便签（mockup .C .sys） */
+body.theme-c .sysline {
+  color: #3a4a6b;
+  background: #fde8b8;
+  border: 1.5px dashed #b8945a;
+  border-radius: 4px;
+  padding: 2px 10px;
+  width: fit-content;
+  margin: 4px auto;
+  transform: rotate(-1deg);
 }
 
 /* Turn-summary notice: same family as .sysline but distinct (green accent). */
@@ -100,11 +302,38 @@ body {
   padding: 3px 6px;
 }
 
+body.theme-b .sysline.summary {
+  border-radius: 8px;
+  width: fit-content;
+  margin: 4px auto;
+}
+
+body.theme-c .sysline.summary {
+  color: #4a6b3a;
+  background: #e6f2d2;
+  border: 1.5px dashed #8fae6b;
+  border-radius: 4px;
+  width: fit-content;
+  margin: 4px auto;
+}
+
 #composer {
   display: flex;
   gap: 6px;
   padding: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body.theme-a #composer {
+  border-top-color: rgba(143, 168, 204, 0.15);
+}
+
+body.theme-b #composer {
+  border-top-color: rgba(255, 255, 255, 0.05);
+}
+
+body.theme-c #composer {
+  border-top: 2px solid rgba(58, 74, 107, 0.35);
 }
 
 #input {
@@ -128,6 +357,32 @@ body {
   opacity: 0.5;
 }
 
+body.theme-a #input {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #cfd6e8;
+  border-radius: 10px;
+}
+
+body.theme-b #input {
+  background: #262c3d;
+  border-color: transparent;
+  color: #e6eaf4;
+  border-radius: 10px;
+}
+
+body.theme-b #input:focus {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+body.theme-c #input {
+  background: #ffffff;
+  border: 2px solid #3a4a6b;
+  color: #2b2b3a;
+  border-radius: 10px;
+  padding: 3px 7px; /* compensate for the 2px border keeping inner size */
+}
+
 #send {
   border: none;
   border-radius: 8px;
@@ -147,6 +402,130 @@ body {
   cursor: default;
 }
 
+body.theme-a #send {
+  background: #7c9cd0;
+  border-radius: 10px;
+}
+
+body.theme-a #send:hover {
+  background: #8dabd9;
+}
+
+body.theme-b #send {
+  background: #4a7dc9;
+  border-radius: 10px;
+}
+
+body.theme-b #send:hover {
+  background: #5a8dd6;
+}
+
+body.theme-c #send {
+  background: #3a4a6b;
+  border-radius: 10px;
+}
+
+body.theme-c #send:hover {
+  background: #4a5a7b;
+}
+
+/* ===== Settings panel (v1.1) ===== */
+
+#settings-panel {
+  position: absolute;
+  top: 30px;
+  right: 6px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 210px;
+  padding: 10px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+/* id selector would override the [hidden] UA style — restate it explicitly */
+#settings-panel[hidden] {
+  display: none;
+}
+
+body.theme-a #settings-panel {
+  background: rgba(24, 28, 44, 0.97);
+  border: 1px solid rgba(143, 168, 204, 0.25);
+  color: #cfd6e8;
+}
+
+body.theme-b #settings-panel {
+  background: #232937;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e6eaf4;
+}
+
+body.theme-c #settings-panel {
+  background: #fffdf6;
+  border: 2px solid #3a4a6b;
+  border-radius: 8px;
+  box-shadow: 2px 2px 0 rgba(58, 74, 107, 0.25);
+  color: #3a4a6b;
+}
+
+.style-chips {
+  display: flex;
+  gap: 4px;
+}
+
+.chip {
+  flex: 1;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+}
+
+.chip:hover {
+  opacity: 1;
+}
+
+.chip.active {
+  border-color: currentColor;
+  opacity: 1;
+  font-weight: 600;
+}
+
+.alpha-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#alpha {
+  flex: 1;
+  margin: 0;
+}
+
+body.theme-a #alpha {
+  accent-color: #7c9cd0;
+}
+
+body.theme-b #alpha {
+  accent-color: #4a7dc9;
+}
+
+body.theme-c #alpha {
+  accent-color: #3a4a6b;
+}
+
+#alpha-value {
+  min-width: 2.8em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 #toast {
   position: fixed;
   left: 50%;
@@ -161,4 +540,11 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+body.theme-c #toast {
+  background: #fde8b8;
+  color: #8a4a3a;
+  border: 1.5px dashed #b8945a;
+  border-radius: 4px;
 }

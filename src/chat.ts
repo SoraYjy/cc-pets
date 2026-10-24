@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { decideDoneFallback, type ChatEntry } from "./history";
+import { clampOpacity, normalizeStyle, type ThemeStyle } from "./theme";
 
 // Backend chat.rs emits { kind: "init" | "text" | "done", text }.
 interface ChatEventPayload {
@@ -21,6 +22,11 @@ const messagesEl = document.getElementById("messages") as HTMLElement;
 const inputEl = document.getElementById("input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("send") as HTMLButtonElement;
 const closeBtn = document.getElementById("close") as HTMLButtonElement;
+const settingsToggle = document.getElementById("settings-toggle") as HTMLButtonElement;
+const settingsPanel = document.getElementById("settings-panel") as HTMLElement;
+const alphaRange = document.getElementById("alpha") as HTMLInputElement;
+const alphaValue = document.getElementById("alpha-value") as HTMLElement;
+const styleChips = Array.from(document.querySelectorAll<HTMLButtonElement>(".chip"));
 
 let sending = false;
 let streamingBubble: HTMLElement | null = null;
@@ -182,6 +188,10 @@ interface ChatHistoryPayload {
 }
 
 function renderHistory(entries: ChatEntry[]): void {
+  // Guard (Task 3 deferred fix): a catch-up delivery landing mid-stream must
+  // not clear-and-redraw over an in-flight streaming bubble — the next
+  // catch-up (full log) re-renders once the turn is done, so skip instead.
+  if (streamingBubble !== null) return;
   messagesEl.textContent = ""; // clears all children
   streamingBubble = null; // its element was just removed from the DOM
   connectedLine = null; // stale reference; the next init makes a fresh line
@@ -229,6 +239,73 @@ window.addEventListener("unhandledrejection", (e) => {
   console.error("chat unhandled rejection:", e.reason);
   logLine(`[chat] unhandled rejection: ${String(e.reason)}`);
 });
+
+// ===== Settings (v1.1): three themes + window opacity =====
+
+// get_settings payload (src-tauri/src/settings.rs Settings { style, opacity }).
+interface SettingsPayload {
+  style: string;
+  opacity: number;
+}
+
+let currentStyle: ThemeStyle = "c";
+let currentOpacity = 0.92;
+
+// apply = swap the body theme class + write the CSS alpha variable. The window
+// background and every theme rule read the class / --win-alpha live, so this
+// one function is the whole "make it so" (normalize also guards hand-edited
+// settings.json values).
+function applySettings(style: string | undefined, opacity: number): void {
+  currentStyle = normalizeStyle(style);
+  currentOpacity = clampOpacity(opacity);
+  document.body.className = `theme-${currentStyle}`;
+  document.documentElement.style.setProperty("--win-alpha", String(currentOpacity));
+  alphaRange.value = String(currentOpacity);
+  alphaValue.textContent = String(currentOpacity);
+  for (const chip of styleChips) {
+    chip.classList.toggle("active", chip.dataset.style === currentStyle);
+  }
+}
+
+// Persist current settings; a failed save keeps the applied look and degrades
+// silently to one debug-log line.
+function saveSettings(): void {
+  invoke("save_settings", { style: currentStyle, opacity: currentOpacity }).catch(
+    (err: unknown) => {
+      console.error("save_settings failed:", err);
+      logLine(`[chat] save_settings failed: ${String(err)}`);
+    },
+  );
+}
+
+settingsToggle.addEventListener("click", () => {
+  settingsPanel.hidden = !settingsPanel.hidden;
+});
+
+// 风格芯片：点选即 apply（换主题类）+ save（opacity 保持当前值）。
+for (const chip of styleChips) {
+  chip.addEventListener("click", () => {
+    applySettings(chip.dataset.style, currentOpacity);
+    saveSettings();
+  });
+}
+
+// 透明度滑杆：input 即时 apply（只动 --win-alpha，拖动全程平滑），change 才 save。
+alphaRange.addEventListener("input", () => {
+  currentOpacity = clampOpacity(Number(alphaRange.value));
+  document.documentElement.style.setProperty("--win-alpha", String(currentOpacity));
+  alphaValue.textContent = String(currentOpacity);
+});
+alphaRange.addEventListener("change", saveSettings);
+
+// Startup load; read failure → defaults + one debug line (读不出来不挡聊天).
+void invoke<SettingsPayload>("get_settings")
+  .then((s) => applySettings(s.style, s.opacity))
+  .catch((err: unknown) => {
+    console.error("get_settings failed, falling back to defaults:", err);
+    applySettings("c", 0.92);
+    logLine(`[chat] get_settings failed, defaults applied: ${String(err)}`);
+  });
 
 // 关闭入口（round 4）：无边框窗没有系统 ×，按钮 / Esc 都走 close()——
 // close() 触发上面的 onCloseRequested → chat_stop，链路保持不变。
