@@ -37,14 +37,6 @@ function scrollBottom(): void {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-function systemLine(text: string): void {
-  const el = document.createElement("div");
-  el.className = "sysline";
-  el.textContent = text;
-  messagesEl.appendChild(el);
-  scrollBottom();
-}
-
 // Persistent "connected" line: repeated init events update the timestamp in
 // place instead of stacking one line per init (round 3 dedupe).
 let connectedLine: HTMLElement | null = null;
@@ -384,8 +376,8 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "Escape") closeChat();
 });
 
-// Round-3 probe: if the message list ever clears and a NEW loaded line shows
-// up, the window/page was re-created (all JS state reset — investigate the
-// re-creation source next); a cleared list WITHOUT a new loaded line means
-// the wipe happened inside this page's JS state instead.
-systemLine(`chat window loaded @ ${new Date().toLocaleTimeString()}`);
+// Round-3 probe, acceptance round 2: the load marker no longer renders into
+// the visible message area (it was the "empty window, history pops in later"
+// artifact) — diagnostics live in debug.log now. A fresh `loaded` line still
+// timestamps page (re)creation for the log timeline.
+logLine(`[chat] chat window loaded @ ${new Date().toLocaleTimeString()}`);

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
+import { currentMonitor, cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   isPermissionGranted,
@@ -91,6 +91,8 @@ let petEl: HTMLDivElement | null = null;
 let anims: AnimationDef[] = [];
 let rafToken = 0;
 let sessionAnimName = "idle"; // driven by session-status events
+// The sprite cell currently on screen (alpha hit testing reads this).
+let curFrame = { row: 0, col: 0 };
 
 function playAnimation(name: string): void {
   const anim = anims.find((a: AnimationDef) => a.name === name);
@@ -109,10 +111,121 @@ function playAnimation(name: string): void {
       playAnimation(sessionAnimName); // one-shot finished → session state
       return;
     }
-    petEl.style.backgroundPosition = offsetFor(anim.row, frameAt(anim, elapsed));
+    const col = frameAt(anim, elapsed);
+    petEl.style.backgroundPosition = offsetFor(anim.row, col);
+    curFrame = { row: anim.row, col };
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+}
+
+// ===== Pixel-accurate hit testing (acceptance round 2) =====
+
+// Clicks on transparent pixels should fall through to the desktop — only the
+// cat's body is interactive. The spritesheet's alpha channel is the mask: the
+// full sheet is decoded once, and each mousemove probes the alpha of the
+// sprite cell currently on screen at the cursor position.
+const ALPHA_THRESHOLD = 16; // 0–255; below → transparent → ignore mouse
+
+let sheetAlpha: Uint8ClampedArray | null = null; // RGBA of the whole sheet
+let ignoringMouse = false;
+let dragging = false; // hoisted so the hit-test probe can pin non-ignore
+
+async function loadAlphaMask(): Promise<void> {
+  try {
+    const res = await fetch(`${PET_BASE}/spritesheet.png`);
+    const bitmap = await createImageBitmap(await res.blob());
+    const canvas = document.createElement("canvas");
+    canvas.width = SHEET_W;
+    canvas.height = SHEET_H;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("2d context unavailable");
+    ctx.drawImage(bitmap, 0, 0);
+    sheetAlpha = ctx.getImageData(0, 0, SHEET_W, SHEET_H).data;
+  } catch (err) {
+    // No mask → hit testing stays off entirely (window behaves as before).
+    showDebug(`alpha mask load failed: ${errorText(err)}`);
+  }
+}
+
+// Logical cursor position → alpha of the on-screen sprite pixel. The pet
+// element spans the whole 192×208 window, so client coords are element
+// coords; the fractional position maps into the current cell of the sheet.
+function alphaAt(x: number, y: number): number {
+  if (!sheetAlpha) return 255; // no mask → treat everything as opaque
+  const fx = x / CELL_W;
+  const fy = y / CELL_H;
+  if (fx < 0 || fx >= 1 || fy < 0 || fy >= 1) return 0;
+  const px = Math.min(SHEET_W - 1, Math.floor((curFrame.col + fx) * CELL_W));
+  const py = Math.min(SHEET_H - 1, Math.floor((curFrame.row + fy) * CELL_H));
+  return sheetAlpha[(py * SHEET_W + px) * 4 + 3];
+}
+
+let ignorePollTimer: number | null = null;
+
+function stopIgnorePoll(): void {
+  if (ignorePollTimer !== null) {
+    clearInterval(ignorePollTimer);
+    ignorePollTimer = null;
+  }
+}
+
+// While ignored the webview receives NO events (tauri v2's
+// setIgnoreCursorEvents has no forward option), so a low-frequency poll
+// watches the global cursor and flips back to non-ignore as soon as it
+// re-enters the cat's opaque pixels.
+function startIgnorePoll(): void {
+  if (ignorePollTimer !== null) return;
+  const win = getCurrentWindow();
+  ignorePollTimer = window.setInterval(() => {
+    if (!ignoringMouse) {
+      stopIgnorePoll();
+      return;
+    }
+    void (async () => {
+      const [cursor, origin, sf] = await Promise.all([
+        cursorPosition(),
+        win.outerPosition(),
+        win.scaleFactor(),
+      ]);
+      const lx = (cursor.x - origin.x) / sf;
+      const ly = (cursor.y - origin.y) / sf;
+      if (ignoringMouse && alphaAt(lx, ly) >= ALPHA_THRESHOLD) {
+        setIgnoreMouse(false);
+      }
+    })().catch((err: unknown) => {
+      // Fail open: any probe failure returns the window to clickable.
+      console.error("ignore poll failed:", err);
+      setIgnoreMouse(false);
+    });
+  }, 100);
+}
+
+function setIgnoreMouse(ignore: boolean): void {
+  if (ignoringMouse === ignore) return; // only flip on state change
+  ignoringMouse = ignore;
+  if (ignore) startIgnorePoll();
+  else stopIgnorePoll();
+  getCurrentWindow()
+    .setIgnoreCursorEvents(ignore)
+    .catch((err: unknown) => {
+      // Fail open: permission/IPC failure must not leave the pet unclickable.
+      console.error("setIgnoreCursorEvents failed:", err);
+      ignoringMouse = false;
+      stopIgnorePoll();
+    });
+}
+
+// forward:true keeps mouse-MOVE events arriving while ignored, so the probe
+// can flip back to non-ignore as soon as the cursor is over the cat again.
+// While dragging, pin non-ignore (a drag must never lose its window).
+function applyHitTesting(e: MouseEvent): void {
+  if (!sheetAlpha) return;
+  if (dragging) {
+    setIgnoreMouse(false);
+    return;
+  }
+  setIgnoreMouse(alphaAt(e.clientX, e.clientY) < ALPHA_THRESHOLD);
 }
 
 // ===== Backend events =====
@@ -247,8 +360,10 @@ function setupChatLog(): void {
 // exists but its page has not booted yet, so the chat window's
 // listen("chat-history") is not registered and a single emit would be dropped
 // into an empty page context. The chat side renders clear-then-redraw
-// (idempotent), so bounded catch-up re-emits are harmless duplicates: the
-// first lands at the spec'd moment, a later one lands once the page listens.
+// (idempotent), so repeated catch-up re-emits are harmless duplicates. The
+// schedule is front-loaded (acceptance round 2): five pushes at
+// 100/250/500/1000/2000ms so the history appears within ~250ms of opening;
+// deliveries that land before the page listens are safely dropped.
 function emitChatHistory(): void {
   const push = (): void => {
     emit("chat-history", { entries: [...chatLog] }).catch((err: unknown) =>
@@ -256,7 +371,7 @@ function emitChatHistory(): void {
     );
   };
   push();
-  for (const delayMs of [500, 1500, 3000]) {
+  for (const delayMs of [100, 250, 500, 1000, 2000]) {
     setTimeout(push, delayMs);
   }
 }
@@ -281,6 +396,18 @@ function onChatWindowCreated(): void {
   chatCreateInFlight = false;
   setDebugLine("chat window created", 5000);
   emitChatHistory(); // v1.1: only the creation path pushes (setFocus path skips)
+  // Pet stays above the bubble (acceptance round 2): two alwaysOnTop windows
+  // stack by creation order, so re-assert the pet's level whenever the chat
+  // window (re)appears.
+  reassertPetOnTop();
+}
+
+// See onChatWindowCreated — re-applying alwaysOnTop re-stacks the pet above
+// the chat window. (Effect is for the user to verify; recorded in the report.)
+function reassertPetOnTop(): void {
+  getCurrentWindow()
+    .setAlwaysOnTop(true)
+    .catch((err: unknown) => showDebug(`setAlwaysOnTop failed: ${errorText(err)}`));
 }
 
 function onChatWindowError(payload: unknown): void {
@@ -309,6 +436,7 @@ async function openChatWindow(): Promise<void> {
     await existing
       .setFocus()
       .catch((err: unknown) => showDebug(`chat setFocus failed: ${errorText(err)}`));
+    reassertPetOnTop(); // pet must stay above the focused bubble
     return;
   }
   debug("creating chat window…");
@@ -435,7 +563,6 @@ function setupGlobalErrorHooks(): void {
 // dragged and stays within thresholds counts as a click on the pet.
 function setupPointerInteractions(): void {
   let pressed = false;
-  let dragging = false;
   let x0 = 0;
   let y0 = 0;
   let t0 = 0;
@@ -450,6 +577,7 @@ function setupPointerInteractions(): void {
   });
 
   document.addEventListener("mousemove", (e: MouseEvent) => {
+    applyHitTesting(e); // alpha probe runs on every move (see hit-testing block)
     if (!pressed || dragging) return;
     const dist = Math.hypot(e.clientX - x0, e.clientY - y0);
     if (dist > DRAG_THRESHOLD_PX) {
@@ -498,3 +626,4 @@ setupChatLog();
 setupChatWindowListeners();
 setupPointerInteractions();
 init().catch((err) => showDebug(`failed to load pet: ${errorText(err)}`));
+void loadAlphaMask(); // independent of pet.json; failure keeps old behavior

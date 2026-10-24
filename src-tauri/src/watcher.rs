@@ -309,11 +309,16 @@ pub fn run_poller<E>(
             }
         }
 
-        // ---- 4. 清理本轮不在存活列表的 session 的状态 ----
-        let alive_ids: std::collections::HashSet<&String> =
-            alive.iter().map(|(sid, _)| sid).collect();
-        tails.retain(|sid, _| alive_ids.contains(sid));
-        last_end_turn.retain(|sid, _| alive_ids.contains(sid));
+        // ---- 4. 尾读状态跨 staleness 间隙保留（acceptance round 2）----
+        // 不再按本轮 alive 清理 tails/last_end_turn：注册表 updatedAt 只在
+        // 状态迁移时刷新（实测 2.1.302/2.1.310：busy 期间心跳可冻结 82s/
+        // 185s 以上），busy 超过 60s 的回合会被 staleness 剔出 alive——旧
+        // 逻辑把尾读器一并销毁，回合结束心跳刷新重新入选时按「首见」从当
+        // 前文件长度起跳，回合中段追加的 turn_duration 行被永久跳过，通知
+        // 就此丢失。保留状态后，重新入选从上次 offset 续读，间隙内完成的
+        // 回合照常出 turn-complete。状态量 = 见过的 sid 数（个位数字节 ×
+        // 注册表条目数），内存可忽略；staleness 本身仍继续拦截 pid 回绕
+        // （陈旧条目 updatedAt 老，不因 pid 复活变新鲜）。
 
         // ---- 5. 分段 sleep：每 ≤200ms 查一次 stop，保证停止延迟有界 ----
         let deadline = std::time::Instant::now() + interval;
