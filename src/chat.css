@@ -197,6 +197,64 @@ body.theme-a .bubble.assistant::after {
   image-rendering: pixelated;
 }
 
+/* ===== theme-a 打字指示器（mockup .typing/.dots：头像 + 三颗弹跳点） =====
+   DOM 由 chat.ts 在「已发送、首段流式文本/done 未到」期间插入；这里负责
+   仅在 theme-a 可见——主题中途切换也自动隐藏，无需 JS 参与门控。 */
+.typing {
+  display: none;
+}
+
+body.theme-a .typing {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin-bottom: 6px;
+}
+
+body.theme-a .typing .avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  flex: none;
+  background: #e9edf5 url("/pet/spritesheet.png") 0 -4px / 236px 128px no-repeat;
+  image-rendering: pixelated;
+}
+
+body.theme-a .dots {
+  padding: 10px 12px;
+  border-radius: 14px;
+  display: flex;
+  gap: 4px;
+}
+
+body.theme-a .dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #8fa8cc;
+  animation: blink 1.2s infinite;
+}
+
+body.theme-a .dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+body.theme-a .dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes blink {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+  }
+
+  40% {
+    opacity: 1;
+  }
+}
+
 /* ===== theme-b 极简 IM 风（mockup variant B） ===== */
 
 body.theme-b .bubble {

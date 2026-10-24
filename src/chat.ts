@@ -103,6 +103,34 @@ function addDivider(): void {
   scrollBottom();
 }
 
+// Typing indicator (v1.1 review fix): avatar + three bouncing dots, shown
+// between a sent message and the turn's first streamed text / done. DOM lives
+// only in this window — the pet window's chatLog never sees it. Visibility is
+// CSS-gated to body.theme-a, so switching themes mid-wait hides it correctly.
+let typingIndicator: HTMLElement | null = null;
+
+function showTyping(): void {
+  if (typingIndicator) return;
+  const wrap = document.createElement("div");
+  wrap.className = "typing";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  const dots = document.createElement("div");
+  dots.className = "dots";
+  for (let i = 0; i < 3; i++) {
+    dots.appendChild(document.createElement("i"));
+  }
+  wrap.append(avatar, dots);
+  messagesEl.appendChild(wrap);
+  typingIndicator = wrap;
+  scrollBottom();
+}
+
+function hideTyping(): void {
+  typingIndicator?.remove();
+  typingIndicator = null;
+}
+
 function toast(text: string): void {
   let el = document.getElementById("toast");
   if (!el) {
@@ -125,6 +153,7 @@ async function send(): Promise<void> {
   inputEl.disabled = true;
   sendBtn.disabled = true;
   userBubble(text); // local echo before the round-trip
+  showTyping(); // theme-a only (CSS-gated); cleared on first text/done
   // v1.1: report the send to the pet window's history log. Fire-and-forget —
   // a bookkeeping failure must not block the actual send (logged as evidence).
   void emit("chat-user-message", { text }).catch((err: unknown) => {
@@ -160,6 +189,7 @@ void listen<ChatEventPayload>("chat-event", (e) => {
     return;
   }
   if (e.payload.kind === "text") {
+    hideTyping(); // first streamed text of the turn replaces the dots
     const bubble = streamingBubbleFor();
     bubble.textContent += e.payload.text; // textContent: no HTML injection
     scrollBottom();
@@ -169,6 +199,7 @@ void listen<ChatEventPayload>("chat-event", (e) => {
   // bubble; with no open bubble and a non-empty done text (pure tool turn:
   // nothing streamed), materialize the text as an assistant bubble instead
   // (v1.1 兜底). The divider is inserted on EVERY done now, opened or not.
+  hideTyping(); // done also closes the waiting dots (e.g. pure tool turn)
   const fallback = decideDoneFallback(e.payload.text, streamingBubble !== null);
   if (fallback === "bubble") {
     messagesEl.appendChild(makeBubble("assistant", e.payload.text));
@@ -194,6 +225,7 @@ function renderHistory(entries: ChatEntry[]): void {
   if (streamingBubble !== null) return;
   messagesEl.textContent = ""; // clears all children
   streamingBubble = null; // its element was just removed from the DOM
+  typingIndicator = null; // its element was just removed from the DOM
   connectedLine = null; // stale reference; the next init makes a fresh line
   for (const entry of entries) {
     if (entry.role === "system") {
