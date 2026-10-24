@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, RunEvent};
 
 mod chat;
+mod settings;
 mod watcher;
 
 /// debug 日志设施。命令放子模块：crate 根模块里的 `#[tauri::command]` 会
@@ -113,7 +114,9 @@ pub fn run() {
             chat::spawn_chat,
             chat::chat_send,
             chat::chat_stop,
-            debug_log::append_debug
+            debug_log::append_debug,
+            settings::get_settings,
+            settings::save_settings
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
