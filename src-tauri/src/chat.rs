@@ -2,14 +2,15 @@
 //! 成前端事件，把用户输入写进 stdin。多轮复用同一进程，Done 不杀进程。
 //!
 //! 纯逻辑（[`build_command`] / [`parse_chat_line`]）不触碰进程与 IO，全部单测；
-//! 运行时（[`spawn_chat`] / [`chat_send`] / [`chat_stop`]）属集成行为，Task 9
-//! 人工验收。解析全程宽松，无 panic 路径。
+//! [`StderrRing`] 单测覆盖丢最旧/空快照；运行时（[`spawn_chat`] / [`chat_send`]
+//! / [`chat_stop`]）属集成行为，Task 9 人工验收。解析全程宽松，无 panic 路径。
 
 use crate::AppState;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 
@@ -116,42 +117,107 @@ pub fn parse_chat_line(raw: &str) -> ChatEvent {
     }
 }
 
-// ===== 运行时（Task 9 人工验收，不做单测） =====
+// ===== 运行时（Task 9 人工验收，不做单测；StderrRing 除外） =====
 
-/// 一个常驻 claude 对话进程的持有物。stdin 用 Option 包一层：
-/// 置 None 即语义关闭；session_id 在 Init 行到达时回填。
-pub struct ChatProc {
-    pub child: Child,
-    pub stdin: Mutex<Option<ChildStdin>>,
-    pub session_id: Mutex<Option<String>>,
+/// stderr 环形缓冲：容量 [`StderrRing::cap`]，超限丢最旧。stderr 读线程
+/// 逐行 [`StderrRing::push`]，进程退出（EOF 收尸 / chat_stop）时
+/// [`snapshot`](`StderrRing::snapshot`) 一次性落盘——避免 stderr 高频直写
+/// 日志。字段私有，读取走拷贝快照。
+pub struct StderrRing {
+    lines: Mutex<VecDeque<String>>,
+    cap: usize,
 }
 
-/// 全局唯一 chat 实例槽。
+impl StderrRing {
+    pub fn new(cap: usize) -> Self {
+        StderrRing {
+            lines: Mutex::new(VecDeque::new()),
+            cap,
+        }
+    }
+
+    /// 压入一行 stderr；已达容量时丢最旧一行再入队。cap=0 不存任何行。
+    pub fn push(&self, line: &str) {
+        if self.cap == 0 {
+            return;
+        }
+        let mut q = self.lines.lock().expect("stderr ring poisoned");
+        if q.len() >= self.cap {
+            q.pop_front();
+        }
+        q.push_back(line.to_string());
+    }
+
+    /// 当前缓冲内容拷贝（旧→新顺序），至多 `cap` 行。
+    pub fn snapshot(&self) -> Vec<String> {
+        self.lines
+            .lock()
+            .expect("stderr ring poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// 一个常驻 claude 对话进程的持有物。stdin 包 `Arc<Mutex<ChildStdin>>`：
+/// chat_send 在槽锁外持 Arc 写入（锁分离，槽锁绝不跨 stdin 写）；child 包
+/// `Mutex<Child>`：槽里存共享 Arc，而 try_wait/wait 要 `&mut Child`，互斥
+/// 后活性检查在槽锁内即可完成（持锁时间 = 一次 try_wait，不跨界）；child
+/// 锁永远在 stdin 锁之前获取、且不同时持有，无锁序环。session_id 在 Init
+/// 行到达时回填；stderr_ring 与 stderr 读线程各持一份 Arc（同一实例），
+/// 进程退出时由收殓方读出落盘。
+pub struct ChatProc {
+    pub child: Mutex<Child>,
+    pub stdin: Arc<Mutex<ChildStdin>>,
+    pub session_id: Mutex<Option<String>>,
+    pub stderr_ring: Arc<StderrRing>,
+}
+
+/// 全局唯一 chat 实例槽（存 `Arc<ChatProc>`：chat_send 取 clone 后即可
+/// 出锁写 stdin，不必持槽锁）。
 ///
 /// 选 `OnceLock` 静态而非挂 AppState 的理由：chat 生命周期要独立于 Tauri
 /// managed state 被两个无调用关系的执行流触碰——读线程在进程自然退出时清理
 /// 此槽、`stop_internal` 在 ExitRequested 钩子里清槽，都不想依赖 setup 时序
 /// （槽在 setup 之前就可用），也让 chat 模块自包含；AppState 只保留
 /// poller_stop / self_pids 这类跨模块基础设施。
-static CHAT: OnceLock<Mutex<Option<ChatProc>>> = OnceLock::new();
+static CHAT: OnceLock<Mutex<Option<Arc<ChatProc>>>> = OnceLock::new();
 
-fn chat_slot() -> &'static Mutex<Option<ChatProc>> {
+fn chat_slot() -> &'static Mutex<Option<Arc<ChatProc>>> {
     CHAT.get_or_init(|| Mutex::new(None))
 }
 
+/// 进程退出统一落盘点（EOF 收尸与 chat_stop 两处共用）：先记退出码
+/// （信号死/拿不到写 unknown），再把 stderr 环形缓冲逐行落盘（前缀
+/// `[stderr] `，至多 cap=50 行）。
+fn log_chat_exit(ring: &StderrRing, status: Option<ExitStatus>) {
+    let code = status
+        .and_then(|s| s.code())
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    crate::log_line(&format!("chat process exited (code={code})"));
+    for l in ring.snapshot() {
+        crate::log_line(&format!("[stderr] {l}"));
+    }
+}
+
 /// stop 的内部实现（command 与退出钩子共用）：短暂持锁取走实例，锁外
-/// 关 stdin → start_kill → `child.wait()` 收尸（SIGKILL 后立即返回，即
-/// 「有界等待」的形态；不保存读线程 JoinHandle 以维持 ChatProc 字段逐字，
-/// 读线程在 stdout EOF 后自行退出并做幂等清理——槽已空、pid 已移除均为
-/// no-op）→ 清槽（上面 take 即清）→ self_pids 移除。
+/// SIGKILL → `child.wait()` 收尸（SIGKILL 后立即返回，即「有界等待」的
+/// 形态）→ 落退出码与 stderr 缓冲（[`log_chat_exit`]，此时收殓方仍持
+/// proc，stderr 线程已随 EOF/管道关闭结束，快照完整）→ self_pids 移除。
+/// stdin 不再需要「先置 None 语义关闭」的旧舞步：Arc 结构下 SIGKILL 即刻
+/// 生效，proc 连同 stdin 句柄随 take 出槽后自然释放。
 pub fn stop_internal(state: &AppState) -> Result<(), String> {
     let taken = chat_slot().lock().expect("chat slot poisoned").take();
-    if let Some(mut p) = taken {
-        // 先语义关 stdin（部分 CLI 靠 EOF 收尾），再 SIGKILL 兜底
-        *p.stdin.lock().expect("stdin poisoned") = None;
-        let pid = p.child.id();
-        let _ = p.child.kill();
-        let _ = p.child.wait();
+    if let Some(p) = taken {
+        // 单次持 child 锁完成 kill + wait 收尸（SIGKILL 后立即返回）
+        let (pid, status) = {
+            let mut c = p.child.lock().expect("chat child poisoned");
+            let pid = c.id();
+            let _ = c.kill();
+            (pid, c.wait().ok())
+        };
+        log_chat_exit(&p.stderr_ring, status);
         state
             .self_pids
             .lock()
@@ -166,14 +232,19 @@ pub fn stop_internal(state: &AppState) -> Result<(), String> {
 /// 「已存在先 kill 重启」计划；仅当无实例或旧实例已退出时才 spawn 新进程。
 /// 返回 Ok(子进程 pid 字符串；活实例复用时为 "already running")；
 /// session_id 稍后随 init 事件异步到达。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     // 活实例探测：try_wait Ok(None) = 进程还活着，直接复用。锁内只做探测，
     // 锁外再走 stop_internal（它要拿同一把锁，持锁调用会死锁）。
     {
-        let mut slot = chat_slot().lock().expect("chat slot poisoned");
-        if let Some(p) = slot.as_mut() {
-            if p.child.try_wait().map_or(false, |st| st.is_none()) {
+        let slot = chat_slot().lock().expect("chat slot poisoned");
+        if let Some(p) = slot.as_ref() {
+            if p.child
+                .lock()
+                .expect("chat child poisoned")
+                .try_wait()
+                .map_or(false, |st| st.is_none())
+            {
                 crate::log_line("chat already running; reusing (no respawn)");
                 return Ok("already running".to_string());
             }
@@ -189,6 +260,7 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
     let pid = child.id();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
     let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
         // 半启动失败：不留僵尸 claude
         crate::log_line("chat spawn aborted: claude spawned without piped stdio");
@@ -203,11 +275,27 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
         .expect("self_pids poisoned")
         .insert(pid);
 
-    *chat_slot().lock().expect("chat slot poisoned") = Some(ChatProc {
-        child,
-        stdin: Mutex::new(Some(stdin)),
+    // stderr 环形缓冲（cap=50）：读线程与 ChatProc 各持一份 Arc（同一
+    // 实例），进程退出时由收殓方（EOF 收尸 / chat_stop）快照落盘。
+    let ring = Arc::new(StderrRing::new(50));
+    if let Some(stderr) = stderr {
+        let ring_for_stderr = Arc::clone(&ring);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                match line {
+                    Ok(l) => ring_for_stderr.push(&l),
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    *chat_slot().lock().expect("chat slot poisoned") = Some(Arc::new(ChatProc {
+        child: Mutex::new(child),
+        stdin: Arc::new(Mutex::new(stdin)),
         session_id: Mutex::new(None),
-    });
+        stderr_ring: Arc::clone(&ring),
+    }));
 
     // 读线程：逐行解析 stdout → emit；Done 不杀进程（保持多轮）；
     // stdout EOF（进程自然退出）→ 清全局槽 + self_pids 移除。
@@ -243,19 +331,21 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
                 ChatEvent::Ignored => {}
             }
         }
-        // 读线程 EOF：claude 进程已退出
-        crate::log_line(&format!("chat process exited (pid={pid}, stdout EOF)"));
-        // 自然退出清理：仅当槽里仍是自己这个实例才收走（防 spawn_chat
-        // 换新竞态下误收新 proc）；槽已空 = chat_stop 已收殓，均为幂等 no-op。
+        // 读线程 EOF：claude 进程已退出。自然退出收殓：仅当槽里仍是自己
+        // 这个实例才收走并落退出日志（防 spawn_chat 换新竞态下误收新
+        // proc）；槽已空/换新 = chat_stop 已收殓，日志由 stop 路径落，这里
+        // 保持幂等 no-op，防双份 stderr 落盘。
         let mut slot = chat_slot().lock().expect("chat slot poisoned");
-        if slot.as_ref().map(|p| p.child.id()) == Some(pid) {
-            if let Some(mut p) = slot.take() {
-                // 兜底收尸，防僵尸；拿得到退出码就记下
-                if let Ok(st) = p.child.wait() {
-                    if let Some(code) = st.code() {
-                        crate::log_line(&format!("chat process exit code={code}"));
-                    }
-                }
+        if slot
+            .as_ref()
+            .map(|p| p.child.lock().expect("chat child poisoned").id())
+            == Some(pid)
+        {
+            if let Some(p) = slot.take() {
+                // 兜底收尸防僵尸 + 落退出码与 stderr 缓冲（ring 与
+                // p.stderr_ring 是同一实例，用读线程这份绕开借用）
+                let status = p.child.lock().expect("chat child poisoned").wait().ok();
+                log_chat_exit(&ring, status);
             }
         }
         drop(slot);
@@ -267,27 +357,46 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
 }
 
 /// 向常驻 claude 写一条 user 消息（双向 stream-json 协议）。
-#[tauri::command]
+///
+/// 锁纪律（评审红线）：槽锁只做「查空 + try_wait 活性检查 + clone Arc」，
+/// 拿到 Arc 后必须先 drop 槽 guard 再碰 stdin——stdin 写可能阻塞（下游
+/// 不读时管道写满即卡），绝不允许持槽锁跨这个阻塞点，否则并发
+/// spawn_chat / chat_stop 会被拖死。
+#[tauri::command(async)]
 pub fn chat_send(text: String) -> Result<(), String> {
     // 只记长度不记内容：日志落盘的是诊断信息，不是对话记录
     crate::log_line(&format!("chat_send (len={})", text.len()));
-    let guard = chat_slot().lock().expect("chat slot poisoned");
-    let p = guard.as_ref().ok_or_else(|| "no chat process".to_string())?;
-    let mut stdin_guard = p.stdin.lock().expect("stdin poisoned");
-    let stdin = stdin_guard
-        .as_mut()
-        .ok_or_else(|| "stdin closed".to_string())?;
     let line = serde_json::json!({
         "type": "user",
         "message": { "role": "user", "content": text }
     });
+    // ① 槽锁内：查空 → 活性检查 → clone Arc，随即出锁
+    let proc = {
+        let slot = chat_slot().lock().expect("chat slot poisoned");
+        let p = slot
+            .as_ref()
+            .ok_or_else(|| "no chat process".to_string())?;
+        // Ok(None) = 进程还活着；已退出/探测失败一律拒绝
+        if !p
+            .child
+            .lock()
+            .expect("chat child poisoned")
+            .try_wait()
+            .map_or(false, |st| st.is_none())
+        {
+            return Err("chat process not running".to_string());
+        }
+        Arc::clone(p)
+    }; // ← 槽 guard 在此 drop；之后任何阻塞都与槽锁无关
+    // ② stdin 锁：真正的写点
+    let mut stdin = proc.stdin.lock().expect("stdin poisoned");
     writeln!(stdin, "{line}").map_err(|e| format!("write stdin failed: {e}"))?;
     stdin.flush().map_err(|e| format!("flush stdin failed: {e}"))?;
     Ok(())
 }
 
 /// 停止常驻 claude 对话进程（幂等：无实例也返回 Ok）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn chat_stop(state: State<'_, AppState>) -> Result<(), String> {
     crate::log_line("chat_stop");
     stop_internal(&state)
@@ -373,5 +482,24 @@ mod tests {
     fn test_garbage_ignored() {
         assert_eq!(parse_chat_line("oops{"), ChatEvent::Ignored);
         assert_eq!(parse_chat_line("{}"), ChatEvent::Ignored);
+    }
+
+    #[test]
+    fn test_stderr_ring_drops_oldest() {
+        let ring = StderrRing::new(3);
+        ring.push("a");
+        ring.push("b");
+        ring.push("c");
+        ring.push("d");
+        assert_eq!(
+            ring.snapshot(),
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_stderr_ring_empty_snapshot() {
+        let ring = StderrRing::new(50);
+        assert_eq!(ring.snapshot(), Vec::<String>::new());
     }
 }
