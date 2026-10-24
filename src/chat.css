@@ -62,12 +62,34 @@ body.theme-b #chat {
   color: #e6eaf4;
 }
 
-/* Header buttons: ⚙ sits left of ×; both float over the messages area. */
+/* Header bar: the only way to move this borderless window — press the empty
+   strip and drag (chat.ts wires mousedown → startDragging); ⚙/× excluded. */
+#titlebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  height: 24px;
+  padding: 0 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+body.theme-a #titlebar {
+  border-bottom-color: rgba(143, 168, 204, 0.15);
+}
+
+body.theme-b #titlebar {
+  border-bottom-color: rgba(255, 255, 255, 0.05);
+}
+
+body.theme-c #titlebar {
+  border-bottom-color: rgba(58, 74, 107, 0.2);
+}
+
+/* Header buttons: ⚙ sits left of ×, both in the titlebar flow. */
 #settings-toggle,
 #close {
-  position: absolute;
-  top: 4px;
-  z-index: 10;
   border: none;
   background: transparent;
   color: rgba(255, 255, 255, 0.35);
@@ -75,14 +97,6 @@ body.theme-b #chat {
   line-height: 1;
   padding: 2px 6px;
   cursor: pointer;
-}
-
-#settings-toggle {
-  right: 30px;
-}
-
-#close {
-  right: 6px;
 }
 
 #settings-toggle:hover,

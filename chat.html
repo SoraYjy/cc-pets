@@ -23,8 +23,11 @@
           <span id="alpha-value">0.92</span>
         </label>
       </div>
-      <button id="settings-toggle" type="button" title="设置">⚙</button>
-      <button id="close" type="button" title="关闭 (Esc)">×</button>
+      <!-- 无边框窗的唯一移动入口：头部空白区按下即拖（⚙/× 除外） -->
+      <header id="titlebar">
+        <button id="settings-toggle" type="button" title="设置">⚙</button>
+        <button id="close" type="button" title="关闭 (Esc)">×</button>
+      </header>
       <section id="messages"></section>
       <footer id="composer">
         <textarea id="input" rows="1" placeholder="和 Lynn 说话（Enter 发送）"></textarea>

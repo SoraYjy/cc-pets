@@ -135,6 +135,12 @@ function setupListeners(): void {
   });
 
   void listen<TurnCompletePayload>("turn-complete", (e) => {
+    // Acceptance round 1: notification evidence chain — the listener entry
+    // and each notification branch leave one persisted breadcrumb, so a
+    // silent no-notification has a timeline (debug.log) to diff against.
+    debug(
+      `turn-complete received: sid=${e.payload.sessionId} summary=${e.payload.summary}`,
+    );
     playAnimation("done");
     // DESIGN §5.3: the bubble window also shows the result summary. Global
     // broadcast — the chat window (if open) picks it up as a system line.
@@ -154,16 +160,21 @@ function setupListeners(): void {
     // this used to be query-only and silently skipped on denied permission).
     void (async () => {
       let granted = await isPermissionGranted();
+      debug(`notification permission: ${granted ? "granted" : "not granted"}`);
       if (!granted) {
         granted = (await requestPermission()) === "granted";
+        debug(
+          `notification permission request: ${granted ? "granted" : "denied"}`,
+        );
       }
       if (granted) {
         sendNotification({
           title: "任务完成",
           body: e.payload.summary ? e.payload.summary : "查看 Claude Code 终端",
         });
+        debug("notification sent");
       } else {
-        showDebug("通知权限未授予");
+        debug("notification skipped: permission not granted");
       }
     })().catch((err: unknown) => showDebug(`notification failed: ${errorText(err)}`));
   });
@@ -210,7 +221,12 @@ function setupChatLog(): void {
   // system entry.
   void listen<ChatEventPayload>("chat-event", (e) => {
     if (e.payload.kind === "init") {
-      recordEntry("system", "会话已连接");
+      // "会话已连接" is connection state, not conversation content — and the
+      // backend emits one init per QUERY (process start + every chat_send),
+      // so recording it here made the persistent log accumulate duplicate
+      // connection lines that re-rendered on every reopen (acceptance round
+      // 1). The live connected line is the chat window's own concern
+      // (showConnected updates in place).
       return;
     }
     if (e.payload.kind === "text") {

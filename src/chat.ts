@@ -22,6 +22,7 @@ const messagesEl = document.getElementById("messages") as HTMLElement;
 const inputEl = document.getElementById("input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("send") as HTMLButtonElement;
 const closeBtn = document.getElementById("close") as HTMLButtonElement;
+const titlebarEl = document.getElementById("titlebar") as HTMLElement;
 const settingsToggle = document.getElementById("settings-toggle") as HTMLButtonElement;
 const settingsPanel = document.getElementById("settings-panel") as HTMLElement;
 const alphaRange = document.getElementById("alpha") as HTMLInputElement;
@@ -219,10 +220,13 @@ interface ChatHistoryPayload {
 }
 
 function renderHistory(entries: ChatEntry[]): void {
-  // Guard (Task 3 deferred fix): a catch-up delivery landing mid-stream must
-  // not clear-and-redraw over an in-flight streaming bubble — the next
-  // catch-up (full log) re-renders once the turn is done, so skip instead.
-  if (streamingBubble !== null) return;
+  // Clear-then-redraw, strictly idempotent: the same input renders the same
+  // DOM regardless of how many catch-up deliveries carry it (acceptance
+  // round 1). Never skip the clear — if a turn is mid-stream, capture its
+  // partial text, re-render the log, then rebuild the streaming placeholder
+  // so the in-flight turn survives (the next "text" fragment appends to it;
+  // done finalizes as usual).
+  const streamedText = streamingBubble !== null ? streamingBubble.textContent : null;
   messagesEl.textContent = ""; // clears all children
   streamingBubble = null; // its element was just removed from the DOM
   typingIndicator = null; // its element was just removed from the DOM
@@ -237,6 +241,11 @@ function renderHistory(entries: ChatEntry[]): void {
       messagesEl.appendChild(makeBubble(entry.role, entry.text));
     }
   }
+  if (streamedText !== null) {
+    const el = makeBubble("assistant", streamedText);
+    messagesEl.appendChild(el);
+    streamingBubble = el;
+  }
   scrollBottom();
 }
 
@@ -249,11 +258,11 @@ void listen<TurnSummaryPayload>("turn-summary", (e) => {
   summaryLine(`✓ 任务完成：${summary}`);
 });
 
-// Stop the claude process when the window closes; fire-and-forget, then let
-// the close proceed (no preventDefault).
-void getCurrentWindow().onCloseRequested(() => {
-  invoke("chat_stop").catch(() => {});
-});
+// Keepalive (acceptance round 1 design ruling): closing the bubble window no
+// longer stops the claude process — it survives across close/reopen, and the
+// next open reuses it via spawn_chat's already-running path, so the
+// conversation continues. chat_stop now runs only on app exit
+// (src-tauri/src/lib.rs ExitRequested hook); nothing to do on close here.
 
 inputEl.focus();
 
@@ -357,6 +366,20 @@ function closeChat(): void {
 }
 
 closeBtn.addEventListener("click", closeChat);
+
+// 拖拽（acceptance round 1）：chat 窗无边框，头部空白区是唯一移动入口。
+// 左键按下即原生拖拽（照 main.ts 宠物窗的 startDragging 模式）；⚙/× 上
+// 的按下不计（按钮自己消费点击）。
+titlebarEl.addEventListener("mousedown", (e: MouseEvent) => {
+  if (e.button !== 0) return;
+  if ((e.target as HTMLElement).closest("button")) return;
+  getCurrentWindow()
+    .startDragging()
+    .catch((err: unknown) => {
+      console.error("startDragging failed:", err);
+      logLine(`[chat] startDragging failed: ${String(err)}`);
+    });
+});
 document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "Escape") closeChat();
 });
