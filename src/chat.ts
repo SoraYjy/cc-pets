@@ -31,28 +31,16 @@ const styleChips = Array.from(document.querySelectorAll<HTMLButtonElement>(".chi
 
 let sending = false;
 let streamingBubble: HTMLElement | null = null;
+let streamingText: Text | null = null; // the growing text node inside it
 let toastTimer: number | null = null;
 
 function scrollBottom(): void {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// Persistent "connected" line: repeated init events update the timestamp in
-// place instead of stacking one line per init (round 3 dedupe).
-let connectedLine: HTMLElement | null = null;
-
-function showConnected(): void {
-  const time = new Date().toLocaleTimeString();
-  if (connectedLine && connectedLine.isConnected) {
-    connectedLine.textContent = `会话已连接 @ ${time}`;
-    return;
-  }
-  connectedLine = document.createElement("div");
-  connectedLine.className = "sysline";
-  connectedLine.textContent = `会话已连接 @ ${time}`;
-  messagesEl.appendChild(connectedLine);
-  scrollBottom();
-}
+// Persistent "connected" line removed (v1.1 acceptance round 3): session
+// state has no UI in the bubble; init events are simply ignored (see the
+// chat-event listener).
 
 // Turn summaries go to the top of the message area, newest first — they are
 // status notices, not part of the conversation flow.
@@ -66,27 +54,42 @@ function summaryLine(text: string): void {
 }
 
 // Shared bubble factory (extracted so the history re-render and the done
-// fallback reuse the exact same user/assistant markup). textContent only.
-function makeBubble(kind: "user" | "assistant", text: string): HTMLElement {
+// fallback reuse the exact same user/assistant markup). The message text is
+// a leading text node followed by a right-aligned timestamp span — created
+// via createTextNode/textContent only, so the XSS surface is unchanged.
+// `ts` defaults to now; the history re-render passes the recorded entry.ts.
+function makeBubble(
+  kind: "user" | "assistant",
+  text: string,
+  ts?: string,
+): { el: HTMLElement; textNode: Text } {
   const el = document.createElement("div");
   el.className = `bubble ${kind}`;
-  el.textContent = text;
-  return el;
+  const textNode = document.createTextNode(text);
+  el.appendChild(textNode);
+  const stamp = document.createElement("span");
+  stamp.className = "bubble-ts";
+  stamp.textContent = ts ?? new Date().toLocaleTimeString();
+  el.appendChild(stamp);
+  return { el, textNode };
 }
 
 function userBubble(text: string): void {
-  messagesEl.appendChild(makeBubble("user", text));
+  messagesEl.appendChild(makeBubble("user", text).el);
   scrollBottom();
 }
 
-// Current turn's assistant bubble; created on first streamed text of the turn.
-function streamingBubbleFor(): HTMLElement {
-  if (!streamingBubble) {
-    const el = makeBubble("assistant", "");
-    messagesEl.appendChild(el);
-    streamingBubble = el;
+// Current turn's assistant bubble; created on first streamed text of the
+// turn. Returns the growing TEXT NODE so appends never touch the timestamp
+// span (textContent += would wipe it — it replaces all children).
+function streamingBubbleFor(): Text {
+  if (!streamingText) {
+    const made = makeBubble("assistant", "");
+    streamingBubble = made.el;
+    streamingText = made.textNode;
+    messagesEl.appendChild(made.el);
   }
-  return streamingBubble;
+  return streamingText;
 }
 
 function addDivider(): void {
@@ -178,13 +181,12 @@ sendBtn.addEventListener("click", () => void send());
 
 void listen<ChatEventPayload>("chat-event", (e) => {
   if (e.payload.kind === "init") {
-    showConnected();
+    // Acceptance round 3: no connection line — session state has no bubble UI.
     return;
   }
   if (e.payload.kind === "text") {
     hideTyping(); // first streamed text of the turn replaces the dots
-    const bubble = streamingBubbleFor();
-    bubble.textContent += e.payload.text; // textContent: no HTML injection
+    streamingBubbleFor().appendData(e.payload.text); // text node: no HTML injection
     scrollBottom();
     return;
   }
@@ -195,10 +197,17 @@ void listen<ChatEventPayload>("chat-event", (e) => {
   hideTyping(); // done also closes the waiting dots (e.g. pure tool turn)
   const fallback = decideDoneFallback(e.payload.text, streamingBubble !== null);
   if (fallback === "bubble") {
-    messagesEl.appendChild(makeBubble("assistant", e.payload.text));
+    messagesEl.appendChild(makeBubble("assistant", e.payload.text).el);
     scrollBottom();
   }
+  // The assistant message's time is its completion time: refresh the stamp
+  // as the turn closes (fallback bubbles are stamped at creation).
+  if (streamingBubble !== null) {
+    const stamp = streamingBubble.querySelector(".bubble-ts");
+    if (stamp) stamp.textContent = new Date().toLocaleTimeString();
+  }
   streamingBubble = null;
+  streamingText = null;
   addDivider();
 });
 
@@ -218,11 +227,11 @@ function renderHistory(entries: ChatEntry[]): void {
   // partial text, re-render the log, then rebuild the streaming placeholder
   // so the in-flight turn survives (the next "text" fragment appends to it;
   // done finalizes as usual).
-  const streamedText = streamingBubble !== null ? streamingBubble.textContent : null;
+  const streamedText = streamingText !== null ? streamingText.data : null;
   messagesEl.textContent = ""; // clears all children
   streamingBubble = null; // its element was just removed from the DOM
+  streamingText = null;
   typingIndicator = null; // its element was just removed from the DOM
-  connectedLine = null; // stale reference; the next init makes a fresh line
   for (const entry of entries) {
     if (entry.role === "system") {
       const el = document.createElement("div");
@@ -230,13 +239,14 @@ function renderHistory(entries: ChatEntry[]): void {
       el.textContent = `${entry.text} @ ${entry.ts}`;
       messagesEl.appendChild(el);
     } else {
-      messagesEl.appendChild(makeBubble(entry.role, entry.text));
+      messagesEl.appendChild(makeBubble(entry.role, entry.text, entry.ts).el);
     }
   }
   if (streamedText !== null) {
-    const el = makeBubble("assistant", streamedText);
-    messagesEl.appendChild(el);
-    streamingBubble = el;
+    const made = makeBubble("assistant", streamedText);
+    messagesEl.appendChild(made.el);
+    streamingBubble = made.el;
+    streamingText = made.textNode;
   }
   scrollBottom();
 }

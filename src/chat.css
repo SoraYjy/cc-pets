@@ -171,6 +171,19 @@ body.theme-a #messages {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* Per-message timestamp (v1.1 acceptance round 3): small, faded, pinned to
+   the bubble's bottom-right. It inherits the bubble's theme ink and only
+   drops opacity, so it coordinates with all three themes without overrides
+   (dark faded ink on theme-c's light bubbles, light faded ink on a/b). */
+.bubble-ts {
+  display: block;
+  text-align: right;
+  font-size: 10px;
+  line-height: 1;
+  margin-top: 3px;
+  opacity: 0.55;
+}
+
 /* ===== theme-a 漫画气泡风（mockup variant A） ===== */
 
 body.theme-a .bubble.user {
