@@ -92,6 +92,18 @@ function formatSummaryLine(
   return `✓ 任务完成${ctx ? ` · ${ctx}` : ""}：${summary}`;
 }
 
+// The single head/body divider for ✓ 任务完成 lines: split once at the first
+// full-width colon. Both the live path and the history re-render go through
+// this, so the block head is always title-only and identical across reopen
+// (review round 2: the live path used to pass the whole line — summary and
+// all — as the head, duplicating it and bypassing the 200px body cap).
+function splitSummaryLine(text: string): { head: string; body: string } {
+  const sep = text.indexOf("：");
+  return sep >= 0
+    ? { head: text.slice(0, sep), body: text.slice(sep + 1) }
+    : { head: text, body: "" };
+}
+
 // Inline pass for one text line: `code` spans first, then **bold** inside
 // the non-code parts. Unmatched markers stay literal text.
 function appendInline(target: HTMLElement, text: string): void {
@@ -369,16 +381,14 @@ function renderHistory(entries: ChatEntry[]): void {
   for (const entry of entries) {
     if (entry.role === "system") {
       // ✓ 任务完成 entries render as the same block as live summaries
-      // (acceptance round 5): the stored text is "head：body" — split once at
-      // the first full-width colon and run the body through the shared
-      // formatter, so a reopen keeps the segmented layout. Other system
-      // lines stay plain centered text.
+      // (acceptance round 5): stored text is "head：body" — split by the
+      // shared divider and run the body through the shared formatter, so a
+      // reopen keeps the segmented layout. Other system lines stay plain
+      // centered text.
       if (entry.text.startsWith("✓ 任务完成")) {
-        const sep = entry.text.indexOf("：");
-        const head = sep >= 0 ? entry.text.slice(0, sep) : entry.text;
-        const bodyText = sep >= 0 ? entry.text.slice(sep + 1) : "";
+        const { head, body } = splitSummaryLine(entry.text);
         messagesEl.appendChild(
-          buildSummaryBlock(`${head} @ ${entry.ts}`, bodyText),
+          buildSummaryBlock(`${head} @ ${entry.ts}`, body),
         );
       } else {
         const el = document.createElement("div");
@@ -408,10 +418,11 @@ void listen<ChatHistoryPayload>("chat-history", (e) => {
 void listen<TurnSummaryPayload>("turn-summary", (e) => {
   const summary = e.payload.summary ? e.payload.summary : "（无文本摘要）";
   const time = new Date().toLocaleTimeString([], { hour12: false });
-  const el = buildSummaryBlock(
-    `[${time}] ${formatSummaryLine(e.payload.project, e.payload.durationMs, summary)}`,
-    summary,
+  // head = title segment only; the summary lives in the (scroll-capped) body.
+  const { head, body } = splitSummaryLine(
+    formatSummaryLine(e.payload.project, e.payload.durationMs, summary),
   );
+  const el = buildSummaryBlock(`[${time}] ${head}`, body);
   messagesEl.insertBefore(el, messagesEl.firstChild);
   messagesEl.scrollTop = 0;
 });
@@ -506,8 +517,9 @@ void invoke<SettingsPayload>("get_settings")
     logLine(`[chat] get_settings failed, defaults applied: ${String(err)}`);
   });
 
-// 关闭入口（round 4）：无边框窗没有系统 ×，按钮 / Esc 都走 close()——
-// close() 触发上面的 onCloseRequested → chat_stop，链路保持不变。
+// 关闭入口（round 4）：无边框窗没有系统 ×，按钮 / Esc（及轮 5 的失焦即关）
+// 都走 close()——close 只关窗；claude 进程保活，收殓由应用退出钩子负责
+// （src-tauri/src/lib.rs ExitRequested → chat_stop，轮 1 裁定）。
 // round 5：close 失败（含 ACL 拒绝）不再静默，具名落日志。
 function closeChat(): void {
   try {
