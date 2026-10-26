@@ -12,10 +12,34 @@ interface ChatEventPayload {
 
 // The pet window rebroadcasts watcher turn-complete summaries as
 // "turn-summary" { sessionId, summary } so finished (external) Claude
-// sessions show up here too (DESIGN §5.3).
+// sessions show up here too (DESIGN §5.3). project/durationMs are additive
+// context fields (acceptance round 4); older senders may omit them.
 interface TurnSummaryPayload {
   sessionId: string;
   summary: string;
+  project?: string;
+  durationMs?: number | null;
+}
+
+// Same formatting rules as main.ts (duplicated: separate bundles, tiny code):
+// duration as "42s" / "3m12s", "" when unknown.
+function formatDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${s % 60}s`;
+}
+
+// `✓ 任务完成 · project（dur）：summary` — the context segment drops out
+// gracefully when project/durationMs are missing (acceptance round 4).
+function formatSummaryLine(
+  project: string | undefined,
+  durationMs: number | null | undefined,
+  summary: string,
+): string {
+  const dur = formatDuration(durationMs);
+  const ctx = `${project ?? ""}${dur ? `（${dur}）` : ""}`;
+  return `✓ 任务完成${ctx ? ` · ${ctx}` : ""}：${summary}`;
 }
 
 const messagesEl = document.getElementById("messages") as HTMLElement;
@@ -257,7 +281,7 @@ void listen<ChatHistoryPayload>("chat-history", (e) => {
 
 void listen<TurnSummaryPayload>("turn-summary", (e) => {
   const summary = e.payload.summary ? e.payload.summary : "（无文本摘要）";
-  summaryLine(`✓ 任务完成：${summary}`);
+  summaryLine(formatSummaryLine(e.payload.project, e.payload.durationMs, summary));
 });
 
 // Keepalive (acceptance round 1 design ruling): closing the bubble window no

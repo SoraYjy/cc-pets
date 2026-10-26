@@ -57,8 +57,12 @@ pub enum LineEvent {
     /// assistant 行且 stop_reason == "end_turn"：携带 message.content 中
     /// 全部 type=="text" 项的 text 拼接（无 text 项为空串）。
     EndTurnText(String),
-    /// system 行且 subtype == "turn_duration"：回合结束信号。
-    TurnDuration { session_id: String },
+    /// system 行且 subtype == "turn_duration"：回合结束信号。duration_ms 取
+    /// 行内 durationMs（缺失/非整数 → None）。
+    TurnDuration {
+        session_id: String,
+        duration_ms: Option<u64>,
+    },
     /// 其余一切（user / cost-state / 非法 JSON / 缺字段）。
     Other,
 }
@@ -94,6 +98,7 @@ pub fn parse_jsonl_line(raw: &str) -> LineEvent {
                 // 关键字段 sessionId 缺失/非字符串 → Other（与「缺字段兜底」一致）
                 Some(sid) => LineEvent::TurnDuration {
                     session_id: sid.to_string(),
+                    duration_ms: v.get("durationMs").and_then(Value::as_u64),
                 },
                 None => LineEvent::Other,
             }
@@ -193,7 +198,7 @@ pub fn run_poller<E>(
         }
 
         // ---- 1. 扫描 sessions/*.json，过滤出存活且新鲜的 session ----
-        let mut alive: Vec<(String, String)> = Vec::new(); // (sessionId, cwd)
+        let mut alive: Vec<(String, String, String)> = Vec::new(); // (sessionId, cwd, name)
         let mut any_busy = false;
         if let Ok(dir) = std::fs::read_dir(claude_dir.join("sessions")) {
             for entry in dir.flatten() {
@@ -220,7 +225,7 @@ pub fn run_poller<E>(
                 if e.status == "busy" {
                     any_busy = true;
                 }
-                alive.push((e.session_id, e.cwd));
+                alive.push((e.session_id, e.cwd, e.name));
             }
         }
 
@@ -235,7 +240,7 @@ pub fn run_poller<E>(
         }
 
         // ---- 3. 逐存活 session 增量尾读 transcript ----
-        for (sid, cwd) in &alive {
+        for (sid, cwd, name) in &alive {
             let path = claude_dir
                 .join("projects")
                 .join(encode_cwd(cwd))
@@ -290,8 +295,13 @@ pub fn run_poller<E>(
                     LineEvent::EndTurnText(s) => {
                         last_end_turn.insert(sid.clone(), s);
                     }
-                    LineEvent::TurnDuration { session_id } => {
-                        // 仅当行内 sessionId 与本文件归属 session 一致才发事件
+                    LineEvent::TurnDuration {
+                        session_id,
+                        duration_ms,
+                    } => {
+                        // 仅当行内 sessionId 与本文件归属 session 一致才发事件。
+                        // name/durationMs 为会话上下文增量字段（acceptance
+                        // round 4）：既有字段一律不动，前端按缺失容错。
                         if session_id == *sid {
                             let summary = last_end_turn.remove(sid).unwrap_or_default();
                             emit(
@@ -300,6 +310,8 @@ pub fn run_poller<E>(
                                     "sessionId": sid,
                                     "cwd": cwd,
                                     "summary": truncate_chars(&summary, 200),
+                                    "name": name,
+                                    "durationMs": duration_ms,
                                 }),
                             );
                         }
@@ -394,7 +406,30 @@ mod tests {
     fn test_turn_duration_parsed() {
         match parse_jsonl_line(r#"{"type":"system","subtype":"turn_duration","sessionId":"abc-123"}"#)
         {
-            LineEvent::TurnDuration { session_id } => assert_eq!(session_id, "abc-123"),
+            LineEvent::TurnDuration {
+                session_id,
+                duration_ms,
+            } => {
+                assert_eq!(session_id, "abc-123");
+                // durationMs 缺失 → None
+                assert_eq!(duration_ms, None);
+            }
+            other => panic!("expected TurnDuration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_turn_duration_with_ms() {
+        match parse_jsonl_line(
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"abc","durationMs":42000}"#,
+        ) {
+            LineEvent::TurnDuration {
+                session_id,
+                duration_ms,
+            } => {
+                assert_eq!(session_id, "abc");
+                assert_eq!(duration_ms, Some(42000));
+            }
             other => panic!("expected TurnDuration, got {:?}", other),
         }
     }
@@ -564,7 +599,7 @@ mod poller_tests {
         let appended = concat!(
             r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"新增摘要"}]}}"#,
             "\n",
-            r#"{"type":"system","subtype":"turn_duration","sessionId":"test-sid"}"#,
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"test-sid","durationMs":61000}"#,
             "\n",
         );
         let proj = tmp
@@ -581,6 +616,8 @@ mod poller_tests {
             "sessionId": "test-sid",
             "cwd": cwd,
             "summary": "新增摘要",
+            "name": "t",
+            "durationMs": 61000,
         });
         let hit = wait_for(
             &rx,

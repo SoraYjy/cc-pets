@@ -239,6 +239,23 @@ interface TurnCompletePayload {
   sessionId: string;
   cwd: string;
   summary: string;
+  // Session context (acceptance round 4, additive fields): the registry
+  // entry's name and the turn_duration row's durationMs (null when absent).
+  name: string;
+  durationMs: number | null;
+}
+
+// Session-context formatting (acceptance round 4): project = cwd basename;
+// duration as "42s" / "3m12s", "" when unknown.
+function projectOf(cwd: string): string {
+  return cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
+}
+
+function formatDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${s % 60}s`;
 }
 
 function setupListeners(): void {
@@ -255,17 +272,23 @@ function setupListeners(): void {
       `turn-complete received: sid=${e.payload.sessionId} summary=${e.payload.summary}`,
     );
     playAnimation("done");
+    const project = projectOf(e.payload.cwd);
+    const dur = formatDuration(e.payload.durationMs);
+    const ctx = dur ? `${project}（${dur}）` : project;
     // DESIGN §5.3: the bubble window also shows the result summary. Global
     // broadcast — the chat window (if open) picks it up as a system line.
+    // project/durationMs are additive context fields (acceptance round 4).
     void emit("turn-summary", {
       sessionId: e.payload.sessionId,
       summary: e.payload.summary,
+      project,
+      durationMs: e.payload.durationMs,
     }).catch((err: unknown) => console.error("turn-summary emit failed:", err));
     // v1.1: mirror the finished turn into the history log (same ✓ wording the
-    // chat window's summary line uses).
+    // chat window's summary line uses, so reopen keeps the session context).
     recordEntry(
       "system",
-      `✓ 任务完成：${e.payload.summary ? e.payload.summary : "（无文本摘要）"}`,
+      `✓ 任务完成 · ${ctx}：${e.payload.summary ? e.payload.summary : "（无文本摘要）"}`,
     );
     // macOS gates notifications behind a one-time system authorization:
     // query first, then request when missing. The first turn-complete after
@@ -282,7 +305,7 @@ function setupListeners(): void {
       }
       if (granted) {
         sendNotification({
-          title: "任务完成",
+          title: `任务完成 · ${ctx}`,
           body: e.payload.summary ? e.payload.summary : "查看 Claude Code 终端",
         });
         debug("notification sent");
