@@ -434,6 +434,25 @@ function emitChatHistory(): void {
 // variant of these events; the flag dedupes against the instance listeners.
 let chatCreateInFlight = false;
 
+// Serialize open attempts (acceptance round 6 bug): a rapid double pet click
+// issued two concurrent create attempts before either getByLabel could see
+// the other's window — two webviews booted under the one "chat" label (log:
+// two "chat window loaded" lines + two spawned pids), after which close()
+// could not address the visible one: light-dismiss looked like "content
+// cleared but won't close" and × was dead. Chained attempts re-run the full
+// openChatWindow body (label check + in-flight skip) after the previous
+// constructor settles, so only one webview can ever come into existence.
+let chatOpenChain: Promise<void> = Promise.resolve();
+
+function openChatWindowSerialized(): Promise<void> {
+  const run = chatOpenChain.then(openChatWindow, openChatWindow);
+  chatOpenChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 function onChatWindowCreated(): void {
   if (!chatCreateInFlight) return;
   chatCreateInFlight = false;
@@ -480,6 +499,13 @@ async function openChatWindow(): Promise<void> {
       .setFocus()
       .catch((err: unknown) => showDebug(`chat setFocus failed: ${errorText(err)}`));
     reassertPetOnTop(); // pet must stay above the focused bubble
+    return;
+  }
+  // Second line of defense against the double-create race (see
+  // openChatWindowSerialized): an earlier create whose outcome event hasn't
+  // landed yet must not be doubled up.
+  if (chatCreateInFlight) {
+    debug("create already in flight → skip", 5000);
     return;
   }
   debug("creating chat window…");
@@ -604,7 +630,7 @@ async function onClickPet(): Promise<void> {
     debug("chat just closed → skip reopen (grace)", 5000);
     return;
   }
-  openChatWindow().catch((err: unknown) =>
+  openChatWindowSerialized().catch((err: unknown) =>
     showDebug(`openChatWindow failed: ${errorText(err)}`),
   );
   // spawn_chat resolves with the child pid (chat.rs: Ok(pid.to_string())).
