@@ -21,27 +21,6 @@ interface TurnSummaryPayload {
   durationMs?: number | null;
 }
 
-// Same formatting rules as main.ts (duplicated: separate bundles, tiny code):
-// duration as "42s" / "3m12s", "" when unknown.
-function formatDuration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return "";
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m${s % 60}s`;
-}
-
-// `✓ 任务完成 · project（dur）：summary` — the context segment drops out
-// gracefully when project/durationMs are missing (acceptance round 4).
-function formatSummaryLine(
-  project: string | undefined,
-  durationMs: number | null | undefined,
-  summary: string,
-): string {
-  const dur = formatDuration(durationMs);
-  const ctx = `${project ?? ""}${dur ? `（${dur}）` : ""}`;
-  return `✓ 任务完成${ctx ? ` · ${ctx}` : ""}：${summary}`;
-}
-
 const messagesEl = document.getElementById("messages") as HTMLElement;
 const inputEl = document.getElementById("input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("send") as HTMLButtonElement;
@@ -66,15 +45,146 @@ function scrollBottom(): void {
 // state has no UI in the bubble; init events are simply ignored (see the
 // chat-event listener).
 
-// Turn summaries go to the top of the message area, newest first — they are
-// status notices, not part of the conversation flow.
-function summaryLine(text: string): void {
-  const time = new Date().toLocaleTimeString([], { hour12: false });
+// Light-dismiss (acceptance round 5): clicking anywhere outside the bubble
+// (desktop, other apps, the cat) blurs this window — losing focus counts as
+// a close request and goes through the same path as ×/Esc (claude process
+// keeps running). hasBeenFocused guards the open race: a window that never
+// got focus must not be closed by a stray initial blur event.
+let hasBeenFocused = false;
+void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+  if (focused) {
+    hasBeenFocused = true;
+    return;
+  }
+  if (hasBeenFocused) {
+    logLine("[chat] blur → close (light-dismiss)");
+    closeChat();
+  }
+});
+
+// ===== Summary block rendering (acceptance round 5) =====
+//
+// Task-complete notices render as a block: a title line (✓ 任务完成 · …)
+// plus a formatted, scrollable content area. The summary is markdown-lite —
+// **bold**, `code`, "- "/"* " bullets, "1. " ordered items, blank lines
+// split paragraphs — built ENTIRELY with programmatic DOM (createElement /
+// createTextNode / textContent); innerHTML is forbidden (XSS line).
+// Unrecognized lines stay plain text.
+
+// Same formatting rules as main.ts (duplicated: separate bundles, tiny code):
+// duration as "42s" / "3m12s", "" when unknown.
+function formatDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${s % 60}s`;
+}
+
+// `✓ 任务完成 · project（dur）：summary` — the context segment drops out
+// gracefully when project/durationMs are missing (acceptance round 4).
+function formatSummaryLine(
+  project: string | undefined,
+  durationMs: number | null | undefined,
+  summary: string,
+): string {
+  const dur = formatDuration(durationMs);
+  const ctx = `${project ?? ""}${dur ? `（${dur}）` : ""}`;
+  return `✓ 任务完成${ctx ? ` · ${ctx}` : ""}：${summary}`;
+}
+
+// Inline pass for one text line: `code` spans first, then **bold** inside
+// the non-code parts. Unmatched markers stay literal text.
+function appendInline(target: HTMLElement, text: string): void {
+  const codeParts = text.split(/`([^`]*)`/);
+  codeParts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      const code = document.createElement("code");
+      code.textContent = part;
+      target.appendChild(code);
+      return;
+    }
+    const boldParts = part.split(/\*\*([^*]+)\*\*/);
+    boldParts.forEach((bp, j) => {
+      if (j % 2 === 1) {
+        const strong = document.createElement("strong");
+        strong.textContent = bp;
+        target.appendChild(strong);
+      } else if (bp !== "") {
+        target.appendChild(document.createTextNode(bp));
+      }
+    });
+  });
+}
+
+function renderSummaryBody(body: HTMLElement, summary: string): void {
+  let paraLines: string[] = [];
+  let list: HTMLUListElement | HTMLOListElement | null = null;
+
+  const flushPara = (): void => {
+    if (paraLines.length === 0) return;
+    const p = document.createElement("p");
+    paraLines.forEach((line, i) => {
+      if (i > 0) p.appendChild(document.createElement("br"));
+      appendInline(p, line);
+    });
+    body.appendChild(p);
+    paraLines = [];
+  };
+  const flushList = (): void => {
+    list = null;
+  };
+
+  for (const raw of summary.split("\n")) {
+    const line = raw.trim();
+    if (line === "") {
+      flushPara();
+      flushList();
+      continue;
+    }
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    const ordered = line.match(/^\d+[.)]\s+(.+)$/);
+    if (bullet) {
+      flushPara();
+      if (!(list instanceof HTMLUListElement)) {
+        list = document.createElement("ul");
+        body.appendChild(list);
+      }
+      const li = document.createElement("li");
+      appendInline(li, bullet[1]);
+      list.appendChild(li);
+      continue;
+    }
+    if (ordered) {
+      flushPara();
+      if (!(list instanceof HTMLOListElement)) {
+        list = document.createElement("ol");
+        body.appendChild(list);
+      }
+      const li = document.createElement("li");
+      appendInline(li, ordered[1]);
+      list.appendChild(li);
+      continue;
+    }
+    flushList();
+    paraLines.push(line);
+  }
+  flushPara();
+}
+
+// Block factory shared by the live turn-summary listener and the history
+// re-render, so reopen produces the exact same segmented layout.
+function buildSummaryBlock(head: string, summary: string): HTMLElement {
   const el = document.createElement("div");
-  el.className = "sysline summary";
-  el.textContent = `[${time}] ${text}`;
-  messagesEl.insertBefore(el, messagesEl.firstChild);
-  messagesEl.scrollTop = 0;
+  el.className = "sysline summary summary-block";
+  const headEl = document.createElement("div");
+  headEl.className = "summary-head";
+  headEl.textContent = head;
+  el.appendChild(headEl);
+  const body = document.createElement("div");
+  body.className = "summary-body";
+  renderSummaryBody(body, summary);
+  el.appendChild(body);
+  return el;
 }
 
 // Shared bubble factory (extracted so the history re-render and the done
@@ -258,10 +368,24 @@ function renderHistory(entries: ChatEntry[]): void {
   typingIndicator = null; // its element was just removed from the DOM
   for (const entry of entries) {
     if (entry.role === "system") {
-      const el = document.createElement("div");
-      el.className = "sysline";
-      el.textContent = `${entry.text} @ ${entry.ts}`;
-      messagesEl.appendChild(el);
+      // ✓ 任务完成 entries render as the same block as live summaries
+      // (acceptance round 5): the stored text is "head：body" — split once at
+      // the first full-width colon and run the body through the shared
+      // formatter, so a reopen keeps the segmented layout. Other system
+      // lines stay plain centered text.
+      if (entry.text.startsWith("✓ 任务完成")) {
+        const sep = entry.text.indexOf("：");
+        const head = sep >= 0 ? entry.text.slice(0, sep) : entry.text;
+        const bodyText = sep >= 0 ? entry.text.slice(sep + 1) : "";
+        messagesEl.appendChild(
+          buildSummaryBlock(`${head} @ ${entry.ts}`, bodyText),
+        );
+      } else {
+        const el = document.createElement("div");
+        el.className = "sysline";
+        el.textContent = `${entry.text} @ ${entry.ts}`;
+        messagesEl.appendChild(el);
+      }
     } else {
       messagesEl.appendChild(makeBubble(entry.role, entry.text, entry.ts).el);
     }
@@ -279,9 +403,17 @@ void listen<ChatHistoryPayload>("chat-history", (e) => {
   renderHistory(e.payload.entries);
 });
 
+// Turn summaries go to the top of the message area, newest first — they are
+// status notices, not part of the conversation flow.
 void listen<TurnSummaryPayload>("turn-summary", (e) => {
   const summary = e.payload.summary ? e.payload.summary : "（无文本摘要）";
-  summaryLine(formatSummaryLine(e.payload.project, e.payload.durationMs, summary));
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  const el = buildSummaryBlock(
+    `[${time}] ${formatSummaryLine(e.payload.project, e.payload.durationMs, summary)}`,
+    summary,
+  );
+  messagesEl.insertBefore(el, messagesEl.firstChild);
+  messagesEl.scrollTop = 0;
 });
 
 // Keepalive (acceptance round 1 design ruling): closing the bubble window no

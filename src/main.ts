@@ -24,6 +24,13 @@ const CHAT_WIDTH = 340;
 const CHAT_HEIGHT = 420;
 const CHAT_GAP_PX = 8; // clearance between pet and bubble
 
+// Light-dismiss (acceptance round 5): both close paths — the bubble's own
+// blur-close and the pet's toggle-close — stamp chatClosedAt; a pet click
+// inside the grace window right after a close is ignored, so the losing
+// side of the blur/toggle race cannot instantly reopen the bubble.
+const CHAT_REOPEN_GRACE_MS = 350;
+let chatClosedAt = 0;
+
 // ===== Debug line =====
 
 // Diagnostic facility (acceptance fix): failure paths that used to be
@@ -546,6 +553,11 @@ async function openChatWindow(): Promise<void> {
   });
   void chat.once("tauri://created", () => onChatWindowCreated());
   void chat.once("tauri://error", (e) => onChatWindowError(e.payload));
+  // Stamp the last destruction time (any close path: blur self-close, toggle,
+  // ×/Esc) so the pet's reopen grace knows the bubble just went away.
+  void chat.once("tauri://destroyed", () => {
+    chatClosedAt = Date.now();
+  });
   // If neither event ever lands, the trail stops here — that absence is the
   // diagnostic signal (e.g. the IPC never settled).
   debug("constructor returned, waiting created/error…");
@@ -553,20 +565,39 @@ async function openChatWindow(): Promise<void> {
 
 // ===== Click/drag =====
 
-function onClickPet(): void {
+// Toggle semantics (acceptance round 5): with light-dismiss, focusing the
+// bubble on pet click would fight the blur-close (click → blur → close →
+// reopen). An open bubble is now closed by the click; a closed one opens.
+async function onClickPet(): Promise<void> {
+  debug("pet clicked");
+  playAnimation("wave");
+  let existing: WebviewWindow | null = null;
   try {
-    debug("pet clicked");
-    playAnimation("wave");
-    openChatWindow().catch((err: unknown) =>
-      showDebug(`openChatWindow failed: ${errorText(err)}`),
-    );
-    // spawn_chat resolves with the child pid (chat.rs: Ok(pid.to_string())).
-    invoke<string>("spawn_chat")
-      .then((pid) => debug(`spawn_chat ok: ${pid}`, 5000))
-      .catch((err: unknown) => showDebug(`spawn_chat failed: ${errorText(err)}`));
+    existing = await WebviewWindow.getByLabel(CHAT_LABEL);
   } catch (err) {
-    showDebug(`onClickPet failed: ${errorText(err)}`);
+    // Keep going: fall through to the open path below.
+    showDebug(`getByLabel failed: ${errorText(err)}`);
   }
+  if (existing) {
+    debug("chat exists → close (toggle)", 5000);
+    chatClosedAt = Date.now();
+    await existing
+      .close()
+      .catch((err: unknown) => showDebug(`chat close failed: ${errorText(err)}`));
+    return;
+  }
+  if (Date.now() - chatClosedAt < CHAT_REOPEN_GRACE_MS) {
+    // The blur self-close beat this click to it — do not instantly reopen.
+    debug("chat just closed → skip reopen (grace)", 5000);
+    return;
+  }
+  openChatWindow().catch((err: unknown) =>
+    showDebug(`openChatWindow failed: ${errorText(err)}`),
+  );
+  // spawn_chat resolves with the child pid (chat.rs: Ok(pid.to_string())).
+  invoke<string>("spawn_chat")
+    .then((pid) => debug(`spawn_chat ok: ${pid}`, 5000))
+    .catch((err: unknown) => showDebug(`spawn_chat failed: ${errorText(err)}`));
 }
 
 // 全局错误钩子（round 5）：未捕获异常/拒绝以前只进控制台、静默丢失——
@@ -618,7 +649,9 @@ function setupPointerInteractions(): void {
       const dist = Math.hypot(e.clientX - x0, e.clientY - y0);
       const dt = performance.now() - t0;
       if (dist <= DRAG_THRESHOLD_PX && dt < CLICK_MAX_MS) {
-        onClickPet();
+        onClickPet().catch((err: unknown) =>
+          showDebug(`onClickPet failed: ${errorText(err)}`),
+        );
       }
     }
     dragging = false;

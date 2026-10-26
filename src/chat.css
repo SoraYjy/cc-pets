@@ -402,6 +402,62 @@ body.theme-c .sysline.summary {
   margin: 4px auto;
 }
 
+/* Block summary (acceptance round 5): title line + formatted content area.
+   Theme colors come from the .sysline.summary rules above (green accent /
+   note styles); the block just switches to left-aligned flowing content. */
+.sysline.summary.summary-block {
+  text-align: left;
+  max-width: 92%;
+}
+
+.summary-head {
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
+.summary-body {
+  max-height: 200px; /* one huge summary must not blow up the bubble */
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.summary-body p {
+  margin: 0 0 4px;
+}
+
+.summary-body p:last-child,
+.summary-body ul:last-child,
+.summary-body ol:last-child {
+  margin-bottom: 0;
+}
+
+.summary-body ul,
+.summary-body ol {
+  margin: 0 0 4px;
+  padding-left: 16px;
+}
+
+.summary-body ul {
+  list-style: disc;
+}
+
+.summary-body ol {
+  list-style: decimal;
+}
+
+.summary-body strong {
+  font-weight: 700;
+}
+
+.summary-body code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  background: rgba(127, 127, 127, 0.18);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
 #composer {
   display: flex;
   gap: 6px;
