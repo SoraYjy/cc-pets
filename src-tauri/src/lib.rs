@@ -37,14 +37,24 @@ mod debug_log {
     /// 带本地时间戳追加一行到 debug 日志；目录自动创建，写失败静默——
     /// 日志是诊断设施，不许反向打断主流程。chat.rs 生命周期日志与前端
     /// debug line（append_debug）共用这一个落盘点。
+    ///
+    /// 行原子性：整行（含时间戳与换行）先格式化进单个 String，再一次
+    /// `write_all` 落盘。O_APPEND 只保证单次 write 系统调用的追加原子性，
+    /// `writeln!`/`write_fmt` 会按格式碎片多次 write——前端 append_debug
+    /// 异步线程与后端日志并发时，时间戳会插进别的行中间（实测日志里 3 处
+    /// 乱码）。整行一次写后，行与行只可能整条错序、不会再互相切碎。
     pub(crate) fn log_line(line: &str) {
+        use std::fmt::Write as _; // String 的 write!（io::Write 未实现于 String，无歧义）
         let Some(path) = path() else { return };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let mut row = String::with_capacity(line.len() + 32);
+        // 唯一可失败点是写入本身，与旧行为一致静默。
+        let _ = write!(row, "[{stamp}] {line}\n");
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(f, "[{stamp}] {line}");
+            let _ = f.write_all(row.as_bytes());
         }
     }
 
