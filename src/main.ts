@@ -7,6 +7,11 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import {
+  formatDuration,
+  projectOf,
+  truncateForNotification,
+} from "./format";
 import { pushCapped, type ChatEntry } from "./history";
 import { frameAt, loadPet, offsetFor, type AnimationDef } from "./sprite";
 
@@ -252,29 +257,9 @@ interface TurnCompletePayload {
   durationMs: number | null;
 }
 
-// Session-context formatting (acceptance round 4): project = cwd basename;
-// duration as "42s" / "3m12s", "" when unknown.
-function projectOf(cwd: string): string {
-  return cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
-}
-
-function formatDuration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return "";
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m${s % 60}s`;
-}
-
-// The system notification stays short (OS notification center): cap at 200
-// chars. The bubble/summary renders the full (watcher-capped 4000) summary
-// — acceptance round 6 lifted the old global 200 truncation.
-const NOTIFICATION_SUMMARY_MAX = 200;
-
-function truncateForNotification(text: string): string {
-  return text.length > NOTIFICATION_SUMMARY_MAX
-    ? `${text.slice(0, NOTIFICATION_SUMMARY_MAX)}…`
-    : text;
-}
+// Session-context formatting (acceptance round 4) — projectOf /
+// formatDuration / truncateForNotification live in format.ts (test-infra L1
+// extraction), pure helpers shared with chat.ts.
 
 function setupListeners(): void {
   void listen<SessionStatusPayload>("session-status", (e) => {

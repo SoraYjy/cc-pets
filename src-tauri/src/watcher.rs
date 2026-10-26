@@ -706,4 +706,345 @@ mod poller_tests {
             events
         );
     }
+
+    // ===== L3 场景级 golden（测试基建）=====
+
+    /// 带超时等一个满足谓词的事件，途中把路过的每个事件都记进 `seen`
+    /// （golden 序列断言需要全程无丢弃的事件流）。
+    fn recv_collect(
+        rx: &Receiver<Ev>,
+        pred: impl Fn(&Ev) -> bool,
+        timeout: Duration,
+        seen: &mut Vec<Ev>,
+    ) -> Option<Ev> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            match rx.recv_timeout(remaining) {
+                Ok(ev) => {
+                    let hit = pred(&ev);
+                    seen.push(ev.clone());
+                    if hit {
+                        return Some(ev);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+
+    /// 多 session 场景 fixture：写一个 session 注册表条目（pid 由调用方给，
+    /// 文件名含 sid 避免同 pid 覆写）+ 对应 transcript，内含一轮已完成历史
+    /// 回合（首见不重放语义下不会出事件）。返回 cwd 字符串供断言用。
+    fn make_session(
+        dir: &std::path::Path,
+        pid: u32,
+        sid: &str,
+        name: &str,
+        status: &str,
+        updated_at: u64,
+        history_summary: &str,
+    ) -> String {
+        let cwd = dir.join(format!("cwd-{}", sid)).to_str().unwrap().to_string();
+
+        let sess_dir = dir.join("sessions");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let entry = format!(
+            r#"{{"pid":{},"sessionId":"{}","cwd":"{}","name":"{}","status":"{}","updatedAt":{}}}"#,
+            pid, sid, cwd, name, status, updated_at
+        );
+        std::fs::write(sess_dir.join(format!("{}-{}.json", pid, sid)), entry).unwrap();
+
+        let proj_dir = dir.join("projects").join(encode_cwd(&cwd));
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let jsonl = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}]}}}}\n\
+             {{\"type\":\"system\",\"subtype\":\"turn_duration\",\"sessionId\":\"{}\"}}\n",
+            history_summary, sid
+        );
+        std::fs::write(proj_dir.join(format!("{}.jsonl", sid)), jsonl).unwrap();
+        cwd
+    }
+
+    /// 向 session 的 transcript 追加一轮完成（end_turn 文本 + turn_duration）。
+    /// `root` 是 fixture 根目录（cwd 可能等于 root 本身——make_fixture 布局
+    /// ——也可能在其下，故不能从 cwd 反推）。
+    fn append_turn(
+        root: &std::path::Path,
+        cwd: &str,
+        sid: &str,
+        summary: &str,
+        duration_ms: Option<u64>,
+    ) {
+        use std::io::Write as _;
+        let proj = root
+            .join("projects")
+            .join(encode_cwd(cwd))
+            .join(format!("{}.jsonl", sid));
+        let dur = match duration_ms {
+            Some(ms) => format!(r#","durationMs":{}"#, ms),
+            None => String::new(),
+        };
+        let turn = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}]}}}}\n\
+             {{\"type\":\"system\",\"subtype\":\"turn_duration\",\"sessionId\":\"{}\"{}}}\n",
+            summary, sid, dur
+        );
+        let mut f = std::fs::OpenOptions::new().append(true).open(&proj).unwrap();
+        f.write_all(turn.as_bytes()).unwrap();
+    }
+
+    /// 多 session 场景 golden（L3）：A busy / B idle / self-pid busy（pid 进
+    /// self_pids）/ stale busy（updatedAt 过期）。A/B 用真实存活子进程 pid
+    ///（self_pids 按 pid 排除，测试进程自己的 pid 进了集合，不能复用给
+    /// A/B）；self 与 stale 用测试进程 pid。四者 transcript 各预置一轮历史
+    ///（首见不重放），随后按 A→B 顺序追加新回合。预期事件序列恰好为：
+    ///   [session-status{working:true}, turn-complete(A 全 payload), turn-complete(B)]
+    /// 实现语义要点（以此为准固定为 golden）：
+    /// - working:true 首 tick 必发（prev_working 初始 None ≠ Some(true)），
+    ///   且 self-pid 的 busy 不计入聚合（self_pids 在 busy 聚合之前排除），
+    ///   stale 的 busy 同样不计（staleness 先剔）；
+    /// - A/B 顺序由「追加并等到上一事件后再追加下一个」构造性确定
+    ///   （read_dir 同 tick 内的顺序不保证，不进 golden）；
+    /// - 全程无第二个 session-status（A 恒存活恒 busy，working 无抖动），
+    ///   无 history 重放、无 self/stale 洩漏（二者 transcript 也各追加一
+    ///   回合，静默由全序列相等断言覆盖）。
+    #[test]
+    fn test_golden_multi_session_scene() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        // 存活探针子进程：sleep 自带限时，即使断言提前 panic 也会自行退出。
+        let mut proc_a = std::process::Command::new("sleep")
+            .arg("20")
+            .spawn()
+            .expect("spawn live-pid helper (sleep)");
+        let mut proc_b = std::process::Command::new("sleep")
+            .arg("20")
+            .spawn()
+            .expect("spawn live-pid helper (sleep)");
+        let cwd_a = make_session(
+            tmp.path(),
+            proc_a.id(),
+            "sid-a",
+            "alpha",
+            "busy",
+            now,
+            "A 历史回合",
+        );
+        let cwd_b = make_session(
+            tmp.path(),
+            proc_b.id(),
+            "sid-b",
+            "beta",
+            "idle",
+            now,
+            "B 历史回合",
+        );
+        let cwd_self = make_session(
+            tmp.path(),
+            std::process::id(),
+            "sid-self",
+            "self",
+            "busy",
+            now,
+            "self 历史回合",
+        );
+        let cwd_stale = make_session(
+            tmp.path(),
+            std::process::id(),
+            "sid-stale",
+            "stale",
+            "busy",
+            now - 120_000,
+            "stale 历史回合",
+        );
+
+        // spawn_poller 的 self_pids 为空集，这里需要登记 self-pid 语义 →
+        // 自带一份带 self_pids 的启动（逻辑与 spawn_poller 相同）。
+        let (tx, rx) = channel();
+        let emit = move |e: &str, v: serde_json::Value| {
+            let _ = tx.send((e.to_string(), v));
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut self_pids: HashSet<u32> = HashSet::new();
+        self_pids.insert(std::process::id());
+        {
+            let dir = tmp.path().to_path_buf();
+            let thread_stop = stop.clone();
+            thread::spawn(move || {
+                run_poller(
+                    &dir,
+                    Arc::new(Mutex::new(self_pids)),
+                    Duration::from_millis(20),
+                    thread_stop,
+                    emit,
+                );
+            });
+        }
+
+        let mut seen: Vec<Ev> = Vec::new();
+
+        // ① 首 tick session-status working:true
+        let hit = recv_collect(
+            &rx,
+            |(e, v)| e == "session-status" && *v == json!({"working": true}),
+            Duration::from_secs(2),
+            &mut seen,
+        );
+        assert!(
+            hit.is_some(),
+            "first tick must emit session-status working:true, got {:?}",
+            seen
+        );
+
+        // ② A 追加回合 → turn-complete（完整 payload：name + durationMs）
+        append_turn(tmp.path(), &cwd_a, "sid-a", "A 新回合", Some(42000));
+        let ta = json!({
+            "sessionId": "sid-a",
+            "cwd": cwd_a,
+            "summary": "A 新回合",
+            "name": "alpha",
+            "durationMs": 42000,
+        });
+        let hit = recv_collect(
+            &rx,
+            |(e, v)| e == "turn-complete" && *v == ta,
+            Duration::from_secs(2),
+            &mut seen,
+        );
+        assert!(hit.is_some(), "expected turn-complete for A, got {:?}", seen);
+
+        // ③ B 追加回合（durationMs 缺失 → payload null）
+        append_turn(tmp.path(), &cwd_b, "sid-b", "B 新回合", None);
+        let tb = json!({
+            "sessionId": "sid-b",
+            "cwd": cwd_b,
+            "summary": "B 新回合",
+            "name": "beta",
+            "durationMs": serde_json::Value::Null,
+        });
+        let hit = recv_collect(
+            &rx,
+            |(e, v)| e == "turn-complete" && *v == tb,
+            Duration::from_secs(2),
+            &mut seen,
+        );
+        assert!(hit.is_some(), "expected turn-complete for B, got {:?}", seen);
+
+        // ④ self / stale 的 transcript 也各追加一回合 —— 必须全程静默。
+        append_turn(tmp.path(), &cwd_self, "sid-self", "self 新回合", Some(1000));
+        append_turn(tmp.path(), &cwd_stale, "sid-stale", "stale 新回合", Some(1000));
+
+        // 收干并固定整场 golden：事件序列恰好为 [status, tc(A), tc(B)]。
+        let rest = stop_and_drain(&stop, &rx);
+        seen.extend(rest);
+        // poller 已停，存活探针子进程即可收殓（sleep 自限时是兜底）。
+        let _ = proc_a.kill();
+        let _ = proc_b.kill();
+        let golden = vec![
+            ("session-status".to_string(), json!({"working": true})),
+            ("turn-complete".to_string(), ta),
+            ("turn-complete".to_string(), tb),
+        ];
+        assert_eq!(
+            seen, golden,
+            "event sequence must match the golden multi-session scene"
+        );
+    }
+
+    /// staleness 间隙后续读（acceptance round 2 修复的回归钉）：session A
+    /// 先入监听（首见 offset 记在历史长度）→ 注册表 updatedAt 过期一轮
+    ///（被剔出 alive）→ 间隙内 transcript 追加新回合 → updatedAt 刷新恢复
+    /// 入选后，尾读器/offset 必须跨间隙保留：补读间隙内回合（turn-complete
+    /// 到达），且间隙前历史不重放。旧实现（间隙销毁尾读器、复活按首见从
+    /// 当前长度起跳）在本测试下 turn-complete 永不到达而超时失败。
+    #[test]
+    fn test_staleness_gap_resumes_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        // make_fixture：busy session（sid=test-sid，pid=测试进程）+ 预置一轮
+        // 历史回合（摘要「任务完成摘要」，首见不重放）。
+        let cwd = make_fixture(tmp.path(), now_ms());
+        let (rx, stop) = spawn_poller(tmp.path());
+        let mut seen: Vec<Ev> = Vec::new();
+
+        // ① 首 tick working:true —— 同时确认 tick 1 已完成首见（offset 定在
+        // 历史长度；此后任何追加都只能走增量读）。
+        let hit = recv_collect(
+            &rx,
+            |(e, v)| e == "session-status" && *v == json!({"working": true}),
+            Duration::from_secs(2),
+            &mut seen,
+        );
+        assert!(
+            hit.is_some(),
+            "first tick must emit session-status working:true, got {:?}",
+            seen
+        );
+
+        // ② 制造 staleness 间隙：updatedAt 过期 → A 被剔 ≥7 tick。
+        let sess = tmp
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", std::process::id()));
+        let stale = format!(
+            r#"{{"pid":{},"sessionId":"test-sid","cwd":"{}","name":"t","status":"busy","updatedAt":{}}}"#,
+            std::process::id(),
+            cwd,
+            now_ms() - 120_000
+        );
+        std::fs::write(&sess, stale).unwrap();
+        thread::sleep(Duration::from_millis(150));
+
+        // ③ 间隙内追加新回合（被剔期间不得读、不得发）。
+        append_turn(tmp.path(), &cwd, "test-sid", "间隙内完成", Some(61000));
+
+        // ④ 恢复：updatedAt 刷新 → 重新入选，从保留的 offset 续读 →
+        // 间隙回合补发 turn-complete。
+        let fresh = format!(
+            r#"{{"pid":{},"sessionId":"test-sid","cwd":"{}","name":"t","status":"busy","updatedAt":{}}}"#,
+            std::process::id(),
+            cwd,
+            now_ms()
+        );
+        std::fs::write(&sess, fresh).unwrap();
+
+        let expected = json!({
+            "sessionId": "test-sid",
+            "cwd": cwd,
+            "summary": "间隙内完成",
+            "name": "t",
+            "durationMs": 61000,
+        });
+        let hit = recv_collect(
+            &rx,
+            |(e, v)| e == "turn-complete" && *v == expected,
+            Duration::from_secs(2),
+            &mut seen,
+        );
+        let _ = stop_and_drain(&stop, &rx);
+
+        assert!(
+            hit.is_some(),
+            "gap turn must be delivered after staleness recovery, got {:?}",
+            seen
+        );
+        // 全程唯一的 turn-complete 就是间隙内那轮——间隙前历史不重放。
+        let completes = seen
+            .iter()
+            .filter(|(e, _)| e == "turn-complete")
+            .count();
+        assert_eq!(
+            completes, 1,
+            "pre-gap history must not be replayed, got {:?}",
+            seen
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|(e, v)| e == "turn-complete" && v["summary"] == "任务完成摘要"),
+            "pre-gap summary must never appear, got {:?}",
+            seen
+        );
+    }
 }

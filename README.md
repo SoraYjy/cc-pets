@@ -35,6 +35,22 @@ npm run tauri build   # 打包
 
 > 回归项：连点猫不刷「会话已连接」；× 关闭正常；theme-a 下发送有打字点动画；日志有 stderr 落盘。
 
+## 测试与回归
+
+回归网分三层，各守一段：
+
+- **L1 格式化 golden**（`src/format.test.ts`）：`src/format.ts` 纯函数（时长/摘要行/项目名/通知截断）的金字表用例——验收轮修过的摘要切分、时长格式化、cwd 解析都有钉子
+- **L2 渲染 golden**（`src/markdown.test.ts`，jsdom）：`renderMarkdown`（marked + DOMPurify）的关键结构渲染 + XSS 攻击样本剥除——innerHTML 白名单防线
+- **L3 watcher 场景**（`src-tauri/src/watcher.rs` 测试模块）：多 session 聚合与 staleness 间隙续读的事件序列 golden——通知丢失类 bug 的回归钉
+
+```bash
+npm test        # 前端（vitest）
+npm run test:rust   # 后端（cargo test）
+npm run test:all    # 全量
+```
+
+纪律：验收修复的 bug 必须在对应层留回归钉（golden 用例），不是只改代码。
+
 ## 已知限制
 
 - macOS 未签名 dev 构建通知可能不弹（既有）；首次触发通知时 macOS 可能弹系统授权框，点「允许」即可

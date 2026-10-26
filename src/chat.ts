@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  formatSummaryLine,
+  splitSummaryLine,
+} from "./format";
 import { decideDoneFallback, type ChatEntry } from "./history";
 import { renderMarkdown } from "./markdown";
 import { clampOpacity, normalizeStyle, type ThemeStyle } from "./theme";
@@ -82,38 +86,8 @@ void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
 // renderMarkdown (marked + DOMPurify — innerHTML is fed sanitized output
 // only), so full tables/code blocks/lists survive the trip.
 
-// Same formatting rules as main.ts (duplicated: separate bundles, tiny code):
-// duration as "42s" / "3m12s", "" when unknown.
-function formatDuration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return "";
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m${s % 60}s`;
-}
-
-// `✓ 任务完成 · project（dur）：summary` — the context segment drops out
-// gracefully when project/durationMs are missing (acceptance round 4).
-function formatSummaryLine(
-  project: string | undefined,
-  durationMs: number | null | undefined,
-  summary: string,
-): string {
-  const dur = formatDuration(durationMs);
-  const ctx = `${project ?? ""}${dur ? `（${dur}）` : ""}`;
-  return `✓ 任务完成${ctx ? ` · ${ctx}` : ""}：${summary}`;
-}
-
-// The single head/body divider for ✓ 任务完成 lines: split once at the first
-// full-width colon. Both the live path and the history re-render go through
-// this, so the block head is always title-only and identical across reopen
-// (review round 2: the live path used to pass the whole line — summary and
-// all — as the head, duplicating it and bypassing the 200px body cap).
-function splitSummaryLine(text: string): { head: string; body: string } {
-  const sep = text.indexOf("：");
-  return sep >= 0
-    ? { head: text.slice(0, sep), body: text.slice(sep + 1) }
-    : { head: text, body: "" };
-}
+// formatSummaryLine / splitSummaryLine / formatDuration live in format.ts
+// (test-infra L1 extraction) — pure helpers shared with main.ts.
 
 // Swap a bubble's plain text node for rendered markdown — assistant messages
 // only, and only at completion/history time (streaming stays plain text so
