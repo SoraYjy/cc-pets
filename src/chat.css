@@ -416,46 +416,131 @@ body.theme-c .sysline.summary {
 }
 
 .summary-body {
-  max-height: 200px; /* one huge summary must not blow up the bubble */
+  max-height: 260px; /* one huge summary must not blow up the bubble */
   overflow-y: auto;
   font-size: 11px;
   line-height: 1.5;
 }
 
-.summary-body p {
-  margin: 0 0 4px;
+/* Rendered markdown (assistant bubbles + summary body, acceptance round 6).
+   Colors inherit the enclosing theme ink — currentColor only, no per-theme
+   hardcoding. .md-body neutralizes the bubble's pre-wrap so the generated
+   HTML's own spacing rules apply. */
+.md-body {
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
-.summary-body p:last-child,
-.summary-body ul:last-child,
-.summary-body ol:last-child {
+.md-body > :first-child {
+  margin-top: 0;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  font-size: 12.5px;
+  line-height: 1.4;
+  margin: 6px 0 3px;
+}
+
+.md-body h1 {
+  font-size: 13.5px;
+}
+
+.md-body h2 {
+  font-size: 13px;
+}
+
+.md-body p {
+  margin: 0 0 5px;
+}
+
+.md-body p:last-child {
   margin-bottom: 0;
 }
 
-.summary-body ul,
-.summary-body ol {
-  margin: 0 0 4px;
-  padding-left: 16px;
+.md-body ul,
+.md-body ol {
+  margin: 0 0 5px;
+  padding-left: 18px;
 }
 
-.summary-body ul {
+.md-body ul:last-child,
+.md-body ol:last-child {
+  margin-bottom: 0;
+}
+
+.md-body li {
+  margin: 1px 0;
+}
+
+.md-body ul {
   list-style: disc;
 }
 
-.summary-body ol {
+.md-body ol {
   list-style: decimal;
 }
 
-.summary-body strong {
+.md-body table {
+  border-collapse: collapse;
+  margin: 0 0 5px;
+  font-size: 11px;
+}
+
+.md-body th,
+.md-body td {
+  border: 1px solid currentColor;
+  padding: 2px 6px;
+  text-align: left;
+}
+
+.md-body th {
   font-weight: 700;
 }
 
-.summary-body code {
+.md-body strong {
+  font-weight: 700;
+}
+
+.md-body code {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 10px;
+  font-size: 10.5px;
   background: rgba(127, 127, 127, 0.18);
   border-radius: 3px;
   padding: 0 3px;
+}
+
+.md-body pre {
+  background: rgba(127, 127, 127, 0.12);
+  border-radius: 6px;
+  padding: 6px 8px;
+  overflow-x: auto; /* wide code scrolls, never stretches the bubble */
+  max-width: 100%;
+}
+
+.md-body pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 10px;
+}
+
+.md-body blockquote {
+  margin: 0 0 5px;
+  padding-left: 8px;
+  border-left: 2px solid currentColor;
+  opacity: 0.85;
+}
+
+.md-body a {
+  color: inherit;
+}
+
+.md-body hr {
+  border: none;
+  border-top: 1px solid rgba(127, 127, 127, 0.4);
+  margin: 6px 0;
 }
 
 #composer {

@@ -169,7 +169,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 /// 轮询循环：每 tick 扫描 `~/.claude/sessions/*.json`，聚合 working 状态发
 /// `session-status`（首 tick 及变化时）；对每个存活 session 增量尾读
 /// transcript，遇 turn_duration 行发 `turn-complete`（携带最近一次 end_turn
-/// 文本摘要，截断 200 字符）。stop 置真后立即返回（分段 sleep，停止延迟
+/// 文本摘要，截断 4000 字符；系统通知由前端自行再截 200）。stop 置真后立即返回（分段 sleep，停止延迟
 /// ≤200ms 有界）。
 pub fn run_poller<E>(
     claude_dir: &Path,
@@ -302,6 +302,8 @@ pub fn run_poller<E>(
                         // 仅当行内 sessionId 与本文件归属 session 一致才发事件。
                         // name/durationMs 为会话上下文增量字段（acceptance
                         // round 4）：既有字段一律不动，前端按缺失容错。
+                        // 摘要上限 4000（acceptance round 6 解除截断）：气泡
+                        // 内 md 全量渲染；系统通知由 main.ts 自行再截 200。
                         if session_id == *sid {
                             let summary = last_end_turn.remove(sid).unwrap_or_default();
                             emit(
@@ -309,7 +311,7 @@ pub fn run_poller<E>(
                                 serde_json::json!({
                                     "sessionId": sid,
                                     "cwd": cwd,
-                                    "summary": truncate_chars(&summary, 200),
+                                    "summary": truncate_chars(&summary, 4000),
                                     "name": name,
                                     "durationMs": duration_ms,
                                 }),
@@ -629,6 +631,49 @@ mod poller_tests {
             hit.is_some(),
             "expected turn-complete for appended turn with payload {:?}",
             expected
+        );
+    }
+
+    /// 解除截断（acceptance round 6）：超长摘要按 4000 字符截断进
+    /// turn-complete payload（旧上限 200）。
+    #[test]
+    fn test_summary_truncated_to_4000() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = make_fixture(tmp.path(), now_ms());
+        let (rx, stop) = spawn_poller(tmp.path());
+
+        // 首扫吃掉 fixture（首见不重放），收干首批事件
+        thread::sleep(Duration::from_millis(300));
+        while rx.try_recv().is_ok() {}
+
+        // 追加一个 5000 字符摘要的回合 → payload 摘要应为 4000 字符
+        let long = "字".repeat(5000);
+        let appended = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"{long}\"}}]}}}}\n\
+             {{\"type\":\"system\",\"subtype\":\"turn_duration\",\"sessionId\":\"test-sid\"}}\n"
+        );
+        let proj = tmp
+            .path()
+            .join("projects")
+            .join(encode_cwd(&cwd))
+            .join("test-sid.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&proj).unwrap();
+        use std::io::Write as _;
+        f.write_all(appended.as_bytes()).unwrap();
+        drop(f);
+
+        let hit = wait_for(
+            &rx,
+            |(e, v)| {
+                e == "turn-complete"
+                    && v["summary"].as_str().map(|s| s.chars().count()) == Some(4000)
+            },
+            Duration::from_secs(2),
+        );
+        stop_and_drain(&stop, &rx);
+        assert!(
+            hit.is_some(),
+            "expected turn-complete with summary truncated to 4000 chars"
         );
     }
 

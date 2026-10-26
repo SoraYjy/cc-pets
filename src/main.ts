@@ -265,6 +265,17 @@ function formatDuration(ms: number | null | undefined): string {
   return `${Math.floor(s / 60)}m${s % 60}s`;
 }
 
+// The system notification stays short (OS notification center): cap at 200
+// chars. The bubble/summary renders the full (watcher-capped 4000) summary
+// — acceptance round 6 lifted the old global 200 truncation.
+const NOTIFICATION_SUMMARY_MAX = 200;
+
+function truncateForNotification(text: string): string {
+  return text.length > NOTIFICATION_SUMMARY_MAX
+    ? `${text.slice(0, NOTIFICATION_SUMMARY_MAX)}…`
+    : text;
+}
+
 function setupListeners(): void {
   void listen<SessionStatusPayload>("session-status", (e) => {
     sessionAnimName = e.payload.working ? "working" : "idle";
@@ -313,7 +324,9 @@ function setupListeners(): void {
       if (granted) {
         sendNotification({
           title: `任务完成 · ${ctx}`,
-          body: e.payload.summary ? e.payload.summary : "查看 Claude Code 终端",
+          body: e.payload.summary
+            ? truncateForNotification(e.payload.summary)
+            : "查看 Claude Code 终端",
         });
         debug("notification sent");
       } else {

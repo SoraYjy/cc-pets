@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { decideDoneFallback, type ChatEntry } from "./history";
+import { renderMarkdown } from "./markdown";
 import { clampOpacity, normalizeStyle, type ThemeStyle } from "./theme";
 
 // Backend chat.rs emits { kind: "init" | "text" | "done", text }.
@@ -74,14 +75,12 @@ void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
   }
 });
 
-// ===== Summary block rendering (acceptance round 5) =====
+// ===== Summary block rendering (acceptance round 5, md since round 6) =====
 //
 // Task-complete notices render as a block: a title line (✓ 任务完成 · …)
-// plus a formatted, scrollable content area. The summary is markdown-lite —
-// **bold**, `code`, "- "/"* " bullets, "1. " ordered items, blank lines
-// split paragraphs — built ENTIRELY with programmatic DOM (createElement /
-// createTextNode / textContent); innerHTML is forbidden (XSS line).
-// Unrecognized lines stay plain text.
+// plus a scroll-capped content area. The body is real markdown rendered by
+// renderMarkdown (marked + DOMPurify — innerHTML is fed sanitized output
+// only), so full tables/code blocks/lists survive the trip.
 
 // Same formatting rules as main.ts (duplicated: separate bundles, tiny code):
 // duration as "42s" / "3m12s", "" when unknown.
@@ -116,83 +115,16 @@ function splitSummaryLine(text: string): { head: string; body: string } {
     : { head: text, body: "" };
 }
 
-// Inline pass for one text line: `code` spans first, then **bold** inside
-// the non-code parts. Unmatched markers stay literal text.
-function appendInline(target: HTMLElement, text: string): void {
-  const codeParts = text.split(/`([^`]*)`/);
-  codeParts.forEach((part, i) => {
-    if (i % 2 === 1) {
-      const code = document.createElement("code");
-      code.textContent = part;
-      target.appendChild(code);
-      return;
-    }
-    const boldParts = part.split(/\*\*([^*]+)\*\*/);
-    boldParts.forEach((bp, j) => {
-      if (j % 2 === 1) {
-        const strong = document.createElement("strong");
-        strong.textContent = bp;
-        target.appendChild(strong);
-      } else if (bp !== "") {
-        target.appendChild(document.createTextNode(bp));
-      }
-    });
-  });
-}
-
-function renderSummaryBody(body: HTMLElement, summary: string): void {
-  let paraLines: string[] = [];
-  let list: HTMLUListElement | HTMLOListElement | null = null;
-
-  const flushPara = (): void => {
-    if (paraLines.length === 0) return;
-    const p = document.createElement("p");
-    paraLines.forEach((line, i) => {
-      if (i > 0) p.appendChild(document.createElement("br"));
-      appendInline(p, line);
-    });
-    body.appendChild(p);
-    paraLines = [];
-  };
-  const flushList = (): void => {
-    list = null;
-  };
-
-  for (const raw of summary.split("\n")) {
-    const line = raw.trim();
-    if (line === "") {
-      flushPara();
-      flushList();
-      continue;
-    }
-    const bullet = line.match(/^[-*]\s+(.+)$/);
-    const ordered = line.match(/^\d+[.)]\s+(.+)$/);
-    if (bullet) {
-      flushPara();
-      if (!(list instanceof HTMLUListElement)) {
-        list = document.createElement("ul");
-        body.appendChild(list);
-      }
-      const li = document.createElement("li");
-      appendInline(li, bullet[1]);
-      list.appendChild(li);
-      continue;
-    }
-    if (ordered) {
-      flushPara();
-      if (!(list instanceof HTMLOListElement)) {
-        list = document.createElement("ol");
-        body.appendChild(list);
-      }
-      const li = document.createElement("li");
-      appendInline(li, ordered[1]);
-      list.appendChild(li);
-      continue;
-    }
-    flushList();
-    paraLines.push(line);
-  }
-  flushPara();
+// Swap a bubble's plain text node for rendered markdown — assistant messages
+// only, and only at completion/history time (streaming stays plain text so
+// partial markdown can't flicker). innerHTML here is exclusively fed
+// renderMarkdown output (DOMPurify-sanitized; the XSS line holds).
+function renderBubbleMarkdown(bubble: HTMLElement, textNode: Text): void {
+  const body = document.createElement("div");
+  body.className = "md-body";
+  body.innerHTML = renderMarkdown(textNode.data);
+  bubble.insertBefore(body, bubble.querySelector(".bubble-ts"));
+  textNode.remove();
 }
 
 // Block factory shared by the live turn-summary listener and the history
@@ -206,7 +138,12 @@ function buildSummaryBlock(head: string, summary: string): HTMLElement {
   el.appendChild(headEl);
   const body = document.createElement("div");
   body.className = "summary-body";
-  renderSummaryBody(body, summary);
+  // Acceptance round 6: the body renders real markdown (DOMPurify-sanitized)
+  // inside the scroll-capped wrapper.
+  const md = document.createElement("div");
+  md.className = "md-body";
+  md.innerHTML = renderMarkdown(summary);
+  body.appendChild(md);
   el.appendChild(body);
   return el;
 }
@@ -355,12 +292,20 @@ void listen<ChatEventPayload>("chat-event", (e) => {
   hideTyping(); // done also closes the waiting dots (e.g. pure tool turn)
   const fallback = decideDoneFallback(e.payload.text, streamingBubble !== null);
   if (fallback === "bubble") {
-    messagesEl.appendChild(makeBubble("assistant", e.payload.text).el);
+    const made = makeBubble("assistant", e.payload.text);
+    renderBubbleMarkdown(made.el, made.textNode);
+    messagesEl.appendChild(made.el);
     scrollBottom();
   }
   // The assistant message's time is its completion time: refresh the stamp
   // as the turn closes (fallback bubbles are stamped at creation).
   if (streamingBubble !== null) {
+    // Acceptance round 6: the turn is complete — swap the plain streaming
+    // text for rendered markdown. The plain→typeset reflow at this instant
+    // is expected; incremental md mid-stream would flicker on partial input.
+    if (streamingText !== null) {
+      renderBubbleMarkdown(streamingBubble, streamingText);
+    }
     const stamp = streamingBubble.querySelector(".bubble-ts");
     if (stamp) stamp.textContent = new Date().toLocaleTimeString();
   }
@@ -409,7 +354,11 @@ function renderHistory(entries: ChatEntry[]): void {
         messagesEl.appendChild(el);
       }
     } else {
-      messagesEl.appendChild(makeBubble(entry.role, entry.text, entry.ts).el);
+      const made = makeBubble(entry.role, entry.text, entry.ts);
+      if (entry.role === "assistant") {
+        renderBubbleMarkdown(made.el, made.textNode); // reopen renders md too
+      }
+      messagesEl.appendChild(made.el);
     }
   }
   if (streamedText !== null) {
