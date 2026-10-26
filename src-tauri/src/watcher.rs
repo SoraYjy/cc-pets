@@ -808,8 +808,9 @@ mod poller_tests {
     /// - A/B 顺序由「追加并等到上一事件后再追加下一个」构造性确定
     ///   （read_dir 同 tick 内的顺序不保证，不进 golden）；
     /// - 全程无第二个 session-status（A 恒存活恒 busy，working 无抖动），
-    ///   无 history 重放、无 self/stale 洩漏（二者 transcript 也各追加一
-    ///   回合，静默由全序列相等断言覆盖）。
+    ///   无 history 重放、无 self/stale 洩漏（二者 transcript 各追加一回
+    ///   合后 poller 继续跑 ≥5 tick——过滤若被删，追加回合必在窗口内出
+    ///   turn-complete 使全等断言确定性变红；正确实现下窗口静默）。
     #[test]
     fn test_golden_multi_session_scene() {
         let tmp = tempfile::tempdir().unwrap();
@@ -936,7 +937,18 @@ mod poller_tests {
         append_turn(tmp.path(), &cwd_self, "sid-self", "self 新回合", Some(1000));
         append_turn(tmp.path(), &cwd_stale, "sid-stale", "stale 新回合", Some(1000));
 
-        // 收干并固定整场 golden：事件序列恰好为 [status, tc(A), tc(B)]。
+        // ⑤ 保持 poller 运行 ≥5 tick（100ms / 20ms）：给过滤回归留出确定性
+        // 显形窗口。若 self_pids 过滤被删，self session 将被首见（offset=历
+        // 史长度，跳过历史）并读走 ④ 的追加回合 → tc(self) 出现；若
+        // staleness 过滤被删，stale session 同理出 tc(stale)。二者的 busy
+        // 即使计入聚合也不改变 working（A 已 busy，无翻转），故回归场景下
+        // drain 恰好多出的只有 turn-complete——全等断言必红。正确实现下两
+        // 腿在 metadata 读之前即被 continue，追加内容永远不被读，窗口内确
+        // 定性静默。
+        thread::sleep(Duration::from_millis(100));
+
+        // 收干并固定整场 golden：事件序列恰好为 [status, tc(A), tc(B)]，
+        // 窗口与收干的全部事件在内一条不多。
         let rest = stop_and_drain(&stop, &rx);
         seen.extend(rest);
         // poller 已停，存活探针子进程即可收殓（sleep 自限时是兜底）。
