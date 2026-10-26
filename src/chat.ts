@@ -45,19 +45,31 @@ function scrollBottom(): void {
 // state has no UI in the bubble; init events are simply ignored (see the
 // chat-event listener).
 
-// Light-dismiss (acceptance round 5): clicking anywhere outside the bubble
-// (desktop, other apps, the cat) blurs this window — losing focus counts as
-// a close request and goes through the same path as ×/Esc (claude process
-// keeps running). hasBeenFocused guards the open race: a window that never
-// got focus must not be closed by a stray initial blur event.
+// Light-dismiss (acceptance round 5, fix round 2): clicking anywhere outside
+// the bubble (desktop, other apps, the cat) blurs this window — losing focus
+// counts as a close request and goes through the same path as ×/Esc (claude
+// process keeps running). The guard is armed from the ACTUAL focus state at
+// load: the creation-time focused=true event fires before this page's
+// listeners exist, so waiting for a focus change that never came left the
+// guard permanently disarmed and light-dismiss dead. Either path arms it.
 let hasBeenFocused = false;
+void getCurrentWindow()
+  .isFocused()
+  .then((focused) => {
+    if (focused) hasBeenFocused = true;
+  })
+  .catch(() => {}); // probe failure → rely on the event path only
 void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
   if (focused) {
     hasBeenFocused = true;
     return;
   }
+  // Both branches leave one breadcrumb so a "not closing" report is readable
+  // straight from debug.log.
+  logLine(
+    `[chat] blur fired, hasBeenFocused=${hasBeenFocused}${hasBeenFocused ? " → close" : " → ignored"}`,
+  );
   if (hasBeenFocused) {
-    logLine("[chat] blur → close (light-dismiss)");
     closeChat();
   }
 });
