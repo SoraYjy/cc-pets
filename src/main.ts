@@ -479,7 +479,15 @@ async function openChatWindow(): Promise<void> {
     showDebug(`getByLabel failed: ${errorText(err)}`);
   }
   if (existing) {
-    debug("chat exists", 5000);
+    // Serialized-chain re-entry (click raced a create): the bubble exists —
+    // reveal + focus it instead of creating a duplicate label.
+    debug("chat exists → show/focus", 5000);
+    await existing
+      .unminimize()
+      .catch((err: unknown) => showDebug(`chat unminimize failed: ${errorText(err)}`));
+    await existing
+      .show()
+      .catch((err: unknown) => showDebug(`chat show failed: ${errorText(err)}`));
     await existing
       .setFocus()
       .catch((err: unknown) => showDebug(`chat setFocus failed: ${errorText(err)}`));
@@ -504,7 +512,7 @@ async function openChatWindow(): Promise<void> {
   let x: number | undefined;
   let y: number | undefined;
   const petWin = getCurrentWindow();
-  const [mon, petPos, petSize] = await Promise.all([
+  const [mon, petPos, petSize, probeSf] = await Promise.all([
     currentMonitor().catch((err: unknown) => {
       showDebug(`currentMonitor failed: ${errorText(err)}`);
       return null;
@@ -517,14 +525,13 @@ async function openChatWindow(): Promise<void> {
       showDebug(`outerSize failed: ${errorText(err)}`);
       return null;
     }),
-  ]);
-  const sf =
-    mon?.scaleFactor ??
-    (await petWin.scaleFactor().catch((err: unknown) => {
+    // Acceptance-fix-9: probed in parallel instead of a serial follow-up await.
+    petWin.scaleFactor().catch((err: unknown) => {
       showDebug(`scaleFactor failed: ${errorText(err)}`);
       return 1;
-    })) ??
-    1;
+    }),
+  ]);
+  const sf = mon?.scaleFactor ?? probeSf ?? 1;
   if (petPos && petSize) {
     const petL = {
       x: petPos.x / sf,
@@ -581,8 +588,14 @@ async function openChatWindow(): Promise<void> {
   });
   void chat.once("tauri://created", () => onChatWindowCreated());
   void chat.once("tauri://error", (e) => onChatWindowError(e.payload));
-  // Stamp the last destruction time (any close path: blur self-close, toggle,
-  // ×/Esc) so the pet's reopen grace knows the bubble just went away.
+  // Hide lifecycle (acceptance-fix-9): stamp the last time the chat went away
+  // from THIS side too — every chat blur lands here, so the pet's toggle can
+  // tell "hidden by this very click's blur" (within grace → stay hidden) from
+  // "hidden earlier" (→ show). The destroyed stamp stays as the fallback for
+  // system-initiated teardown.
+  void chat.onFocusChanged(({ payload: focused }) => {
+    if (!focused) chatClosedAt = Date.now();
+  });
   void chat.once("tauri://destroyed", () => {
     chatClosedAt = Date.now();
   });
@@ -607,16 +620,39 @@ async function onClickPet(): Promise<void> {
     showDebug(`getByLabel failed: ${errorText(err)}`);
   }
   if (existing) {
-    debug("chat exists → close (toggle)", 5000);
-    chatClosedAt = Date.now();
+    // Hide/show lifecycle (acceptance-fix-9): the webview is never destroyed,
+    // so toggle = hidden ? show : hide — no page reload either way.
+    const visible = await existing.isVisible().catch(() => true);
+    if (visible) {
+      debug("chat visible → hide (toggle)", 5000);
+      chatClosedAt = Date.now();
+      await existing
+        .hide()
+        .catch((err: unknown) => showDebug(`chat hide failed: ${errorText(err)}`));
+      return;
+    }
+    if (Date.now() - chatClosedAt < CHAT_REOPEN_GRACE_MS) {
+      // The blur self-hide beat this click to it — the toggle already
+      // happened via the blur path; do not instantly re-show.
+      debug("chat just hid (blur race) → stay hidden", 5000);
+      return;
+    }
+    debug("chat hidden → show", 5000);
     await existing
-      .close()
-      .catch((err: unknown) => showDebug(`chat close failed: ${errorText(err)}`));
+      .unminimize()
+      .catch((err: unknown) => showDebug(`chat unminimize failed: ${errorText(err)}`));
+    await existing
+      .show()
+      .catch((err: unknown) => showDebug(`chat show failed: ${errorText(err)}`));
+    await existing
+      .setFocus()
+      .catch((err: unknown) => showDebug(`chat setFocus failed: ${errorText(err)}`));
+    reassertPetOnTop();
     return;
   }
   if (Date.now() - chatClosedAt < CHAT_REOPEN_GRACE_MS) {
-    // The blur self-close beat this click to it — do not instantly reopen.
-    debug("chat just closed → skip reopen (grace)", 5000);
+    // The blur self-hide beat this click to it — do not instantly re-show.
+    debug("chat just hid → skip reopen (grace)", 5000);
     return;
   }
   openChatWindowSerialized().catch((err: unknown) =>

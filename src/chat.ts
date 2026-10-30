@@ -72,10 +72,10 @@ void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
   // Both branches leave one breadcrumb so a "not closing" report is readable
   // straight from debug.log.
   logLine(
-    `[chat] blur fired, hasBeenFocused=${hasBeenFocused}${hasBeenFocused ? " → close" : " → ignored"}`,
+    `[chat] blur fired, hasBeenFocused=${hasBeenFocused}${hasBeenFocused ? " → hide" : " → ignored"}`,
   );
   if (hasBeenFocused) {
-    closeChat();
+    hideChat();
   }
 });
 
@@ -452,25 +452,26 @@ void invoke<SettingsPayload>("get_settings")
     logLine(`[chat] get_settings failed, defaults applied: ${String(err)}`);
   });
 
-// 关闭入口（round 4）：无边框窗没有系统 ×，按钮 / Esc（及轮 5 的失焦即关）
-// 都走 close()——close 只关窗；claude 进程保活，收殓由应用退出钩子负责
-// （src-tauri/src/lib.rs ExitRequested → chat_stop，轮 1 裁定）。
-// round 5：close 失败（含 ACL 拒绝）不再静默，具名落日志。
-function closeChat(): void {
+// 关闭入口（acceptance-fix-9）：无边框窗没有系统 ×，按钮 / Esc（及轮 5 的
+// 失焦即关）都走 hide()——窗口隐藏而非销毁，DOM/历史/滚动位置全保留，
+// 点猫 show() 瞬时恢复（不再有整页加载）。claude 进程保活，收殓由应用
+// 退出钩子负责（src-tauri/src/lib.rs ExitRequested → chat_stop）。
+// round 5：hide 失败（含 ACL 拒绝）不再静默，具名落日志。
+function hideChat(): void {
   try {
     getCurrentWindow()
-      .close()
+      .hide()
       .catch((err: unknown) => {
-        console.error("chat close() failed:", err);
-        logLine(`[chat] close() failed: ${String(err)}`);
+        console.error("chat hide() failed:", err);
+        logLine(`[chat] hide() failed: ${String(err)}`);
       });
   } catch (err) {
-    console.error("chat close() threw:", err);
-    logLine(`[chat] close() threw: ${String(err)}`);
+    console.error("chat hide() threw:", err);
+    logLine(`[chat] hide() threw: ${String(err)}`);
   }
 }
 
-closeBtn.addEventListener("click", closeChat);
+closeBtn.addEventListener("click", hideChat);
 
 // 拖拽（acceptance round 1）：chat 窗无边框，头部空白区是唯一移动入口。
 // 左键按下即原生拖拽（照 main.ts 宠物窗的 startDragging 模式）；⚙/× 上
@@ -486,7 +487,7 @@ titlebarEl.addEventListener("mousedown", (e: MouseEvent) => {
     });
 });
 document.addEventListener("keydown", (e: KeyboardEvent) => {
-  if (e.key === "Escape") closeChat();
+  if (e.key === "Escape") hideChat();
 });
 
 // Round-3 probe, acceptance round 2: the load marker no longer renders into
