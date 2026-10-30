@@ -574,6 +574,10 @@ async function openChatWindow(): Promise<void> {
     // round 4: survive macOS Space switches — pet window gets the same via
     // tauri.conf.json (WindowConfig.visibleOnAllWorkspaces)
     visibleOnAllWorkspaces: true,
+    // macOS: deliver the first click to the webview when the app is inactive
+    // instead of swallowing it for app activation — one click opens the bubble
+    // (WindowConfig.acceptFirstMouse → WryWebView.acceptsFirstMouse:).
+    acceptFirstMouse: true,
   });
   void chat.once("tauri://created", () => onChatWindowCreated());
   void chat.once("tauri://error", (e) => onChatWindowError(e.payload));
