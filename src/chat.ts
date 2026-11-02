@@ -36,6 +36,8 @@ const settingsPanel = document.getElementById("settings-panel") as HTMLElement;
 const alphaRange = document.getElementById("alpha") as HTMLInputElement;
 const alphaValue = document.getElementById("alpha-value") as HTMLElement;
 const styleChips = Array.from(document.querySelectorAll<HTMLButtonElement>(".chip"));
+const clearBtn = document.getElementById("clear-screen") as HTMLButtonElement;
+const restartBtn = document.getElementById("restart-session") as HTMLButtonElement;
 
 let sending = false;
 let streamingBubble: HTMLElement | null = null;
@@ -442,6 +444,78 @@ alphaRange.addEventListener("input", () => {
   alphaValue.textContent = String(currentOpacity);
 });
 alphaRange.addEventListener("change", saveSettings);
+
+// ===== 清屏 / 重开会话（acceptance-fix-10）=====
+
+// DOM/引用复位范围与 renderHistory 的清空一致（含流式占位与打字点）；
+// chatLog 由 pet 窗经 chat-clear-history 事件清空；claude 进程完全不动，
+// 之后的回复照常接续。
+function clearScreenLocal(): void {
+  messagesEl.textContent = "";
+  streamingBubble = null;
+  streamingText = null;
+  typingIndicator = null;
+  scrollBottom();
+}
+
+function appendSysline(text: string): void {
+  const el = document.createElement("div");
+  el.className = "sysline";
+  el.textContent = text;
+  messagesEl.appendChild(el);
+  scrollBottom();
+}
+
+function clearChatHistory(): void {
+  clearScreenLocal();
+  void emit("chat-clear-history").catch((err: unknown) => {
+    console.error("chat-clear-history emit failed:", err);
+    logLine(`[chat] chat-clear-history emit failed: ${String(err)}`);
+  });
+}
+
+clearBtn.addEventListener("click", () => {
+  clearChatHistory();
+  appendSysline("已清屏（会话保留）");
+});
+
+// 重开会话：内联二次确认（首点武装、3s 不点回弹，不弹系统对话框）。
+// 执行 = 清屏（DOM + chatLog）+ chat_restart（杀旧进程 spawn 新进程）；
+// 新进程的 init 到达不渲染（轮 3 语义保持）。
+const RESTART_LABEL = "重开会话";
+const RESTART_CONFIRM = "确认重开？（将丢失当前对话记忆）";
+let restartArmTimer: number | null = null;
+
+function disarmRestart(): void {
+  if (restartArmTimer !== null) {
+    window.clearTimeout(restartArmTimer);
+    restartArmTimer = null;
+  }
+  restartBtn.textContent = RESTART_LABEL;
+  restartBtn.classList.remove("armed");
+}
+
+restartBtn.addEventListener("click", () => {
+  if (restartArmTimer === null) {
+    restartBtn.textContent = RESTART_CONFIRM;
+    restartBtn.classList.add("armed");
+    restartArmTimer = window.setTimeout(disarmRestart, 3000);
+    return;
+  }
+  disarmRestart();
+  clearChatHistory();
+  invoke("chat_restart")
+    .then(() => {
+      logLine("[chat] chat_restart ok");
+      appendSysline("已重开会话");
+    })
+    .catch((err: unknown) => {
+      console.error("chat_restart failed:", err);
+      logLine(`[chat] chat_restart failed: ${String(err)}`);
+      toast(`重开会话失败：${String(err)}`);
+      appendSysline("重开会话失败（会话保留）");
+    });
+});
 
 // Startup load; read failure → defaults + one debug line (读不出来不挡聊天).
 void invoke<SettingsPayload>("get_settings")

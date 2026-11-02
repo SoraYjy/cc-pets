@@ -360,6 +360,14 @@ function setupChatLog(): void {
   // "done" — accumulated stream wins; when it is empty fall back to done.text
   // (a pure tool turn streams nothing but carries the result). "init" is a
   // system entry.
+  // ③ clear-screen（acceptance-fix-10）：chat 窗已自行清空 DOM，这里同步
+  // 清空持久日志使两边一致。claude 进程/会话上下文不动（「重开会话」走
+  // chat_restart 命令，不经此事件）。在途回合的流式片段（pendingAssistant）
+  // 保留，随该回合 done 正常落一条 assistant。
+  void listen("chat-clear-history", () => {
+    chatLog.length = 0;
+  });
+
   void listen<ChatEventPayload>("chat-event", (e) => {
     if (e.payload.kind === "init") {
       // "会话已连接" is connection state, not conversation content — and the

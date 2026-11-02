@@ -752,6 +752,37 @@ body.theme-c #alpha {
   font-variant-numeric: tabular-nums;
 }
 
+/* Panel actions (acceptance-fix-10): 清屏 / 重开会话 — same chip-family
+   styling so they inherit the theme ink; armed state for the inline
+   restart confirmation highlights the button instead of popping a dialog. */
+.panel-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.panel-actions button {
+  flex: 1;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.panel-actions button:hover {
+  opacity: 1;
+}
+
+.panel-actions button.armed {
+  border-color: currentColor;
+  opacity: 1;
+  font-weight: 600;
+}
+
 #toast {
   position: fixed;
   left: 50%;

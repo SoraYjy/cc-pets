@@ -124,6 +124,7 @@ pub fn run() {
             chat::spawn_chat,
             chat::chat_send,
             chat::chat_stop,
+            chat::chat_restart,
             debug_log::append_debug,
             settings::get_settings,
             settings::save_settings

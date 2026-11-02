@@ -288,6 +288,17 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
     }
     let _ = stop_internal(&state);
 
+    spawn_internal(&app, &state)
+}
+
+/// spawn 的实际执行体（acceptance-fix-10 从 spawn_chat 抽出，供
+/// spawn_chat 与 chat_restart 复用）：杀槽内残留实例（探测后正常为空，
+/// stop 幂等）→ spawn 新常驻进程，接好 stdin/stdout/stderr 三线程与全局
+/// 槽。前置条件：调用方已确认无可复用活实例（spawn_chat 的探测 /
+/// chat_restart 的强制重开语义）。
+fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
+    let _ = stop_internal(state);
+
     let home = dirs::home_dir().ok_or_else(|| "home dir not found".to_string())?;
     let mut child = build_command(&home)
         .spawn()
@@ -398,6 +409,14 @@ pub fn spawn_chat(app: AppHandle, state: State<'_, AppState>) -> Result<String, 
 
     crate::log_line(&format!("chat spawned (pid={pid})"));
     Ok(pid.to_string())
+}
+
+/// 重开会话（acceptance-fix-10）：杀现有会话进程并 spawn 全新进程——模型
+/// 侧对话记忆随旧进程终止而丢失，属「重开」语义。前端在调用前已自行清
+/// DOM/chatLog（chat-clear-history 事件）。只关心成败，pid 不外泄。
+#[tauri::command(async)]
+pub fn chat_restart(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    spawn_internal(&app, &state).map(|_| ())
 }
 
 /// 向常驻 claude 写一条 user 消息（双向 stream-json 协议）。
