@@ -368,7 +368,7 @@ function setupChatLog(): void {
   // 新会话首个回合的账目。
   void listen<{ resetStream?: boolean }>("chat-clear-history", (e) => {
     chatLog.length = 0;
-    if (e.payload.resetStream) {
+    if (e.payload?.resetStream) {
       pendingAssistant = "";
     }
   });
