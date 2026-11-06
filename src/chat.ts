@@ -466,9 +466,15 @@ function appendSysline(text: string): void {
   scrollBottom();
 }
 
-function clearChatHistory(): void {
+function clearChatHistory(resetStream = false): void {
   clearScreenLocal();
-  void emit("chat-clear-history").catch((err: unknown) => {
+  // resetStream（acceptance-fix-11）：重开路径置真——旧进程被 chat_restart
+  // 杀掉后其回合 done 永不到达，pet 侧残留流式片段若不复位会孤儿化并黏进
+  // 新会话首个回合的账目；清屏路径不传（在途片段随 done 落账的既有语义）。
+  void emit(
+    "chat-clear-history",
+    resetStream ? { resetStream: true } : undefined,
+  ).catch((err: unknown) => {
     console.error("chat-clear-history emit failed:", err);
     logLine(`[chat] chat-clear-history emit failed: ${String(err)}`);
   });
@@ -503,7 +509,7 @@ restartBtn.addEventListener("click", () => {
     return;
   }
   disarmRestart();
-  clearChatHistory();
+  clearChatHistory(true);
   invoke("chat_restart")
     .then(() => {
       logLine("[chat] chat_restart ok");

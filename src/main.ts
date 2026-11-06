@@ -363,9 +363,14 @@ function setupChatLog(): void {
   // ③ clear-screen（acceptance-fix-10）：chat 窗已自行清空 DOM，这里同步
   // 清空持久日志使两边一致。claude 进程/会话上下文不动（「重开会话」走
   // chat_restart 命令，不经此事件）。在途回合的流式片段（pendingAssistant）
-  // 保留，随该回合 done 正常落一条 assistant。
-  void listen("chat-clear-history", () => {
+  // 保留，随该回合 done 正常落一条 assistant；resetStream（fix-11）由重开
+  // 路径置真——旧进程被杀后 done 永不到达，残留片段必须复位，否则会黏进
+  // 新会话首个回合的账目。
+  void listen<{ resetStream?: boolean }>("chat-clear-history", (e) => {
     chatLog.length = 0;
+    if (e.payload.resetStream) {
+      pendingAssistant = "";
+    }
   });
 
   void listen<ChatEventPayload>("chat-event", (e) => {
