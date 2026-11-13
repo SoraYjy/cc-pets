@@ -13,7 +13,13 @@ import {
   truncateForNotification,
 } from "./format";
 import { pushCapped, type ChatEntry } from "./history";
-import { frameAt, loadPet, offsetFor, type AnimationDef } from "./sprite";
+import {
+  frameAt,
+  loadPet,
+  offsetFor,
+  shouldWriteFrame,
+  type AnimationDef,
+} from "./sprite";
 
 const PET_BASE = "/pet";
 const CELL_W = 192;
@@ -102,9 +108,20 @@ function errorText(err: unknown): string {
 let petEl: HTMLDivElement | null = null;
 let anims: AnimationDef[] = [];
 let rafToken = 0;
+// The pending rAF handle of the live chain (v1.2 Task 2): kept so the loop can
+// be canceled outright when the page hides (visibilitychange pause).
+let rafId: number | null = null;
+// True while the loop is canceled by a hidden page — the resume path only
+// restarts a loop it actually paused (never injects a spurious play pre-init).
+let loopPausedByHidden = false;
 let sessionAnimName = "idle"; // driven by session-status events
+// The animation the live chain is playing — the restart point when the page
+// becomes visible again (elapsed re-bases at 0 there).
+let currentAnimName = "idle";
 // The sprite cell currently on screen (alpha hit testing reads this).
 let curFrame = { row: 0, col: 0 };
+// v1.2 Task 2 自检计数器：真实 style 写入次数（60s 汇报一次到 debug.log）。
+let spriteWriteCount = 0;
 
 function playAnimation(name: string): void {
   const anim = anims.find((a: AnimationDef) => a.name === name);
@@ -112,9 +129,13 @@ function playAnimation(name: string): void {
     console.error(`animation "${name}" not found in pet.json`);
     return;
   }
+  currentAnimName = name;
   const token = ++rafToken;
   const durationMs = anim.loop ? Infinity : (anim.frames / anim.fps) * 1000;
   let start: number | null = null;
+  // 每条链一份判定基准，换动画/换肤（都经 playAnimation）自然重置——陈旧
+  // 判定不可能跨链泄漏，首帧必写一次。见 shouldWriteFrame（sprite.ts）。
+  let lastWritten: { row: number; col: number } | null = null;
   const tick = (now: number): void => {
     if (!petEl || token !== rafToken) return; // superseded by a newer play
     if (start === null) start = now;
@@ -124,11 +145,66 @@ function playAnimation(name: string): void {
       return;
     }
     const col = frameAt(anim, elapsed);
-    petEl.style.backgroundPosition = offsetFor(anim.row, col);
-    curFrame = { row: anim.row, col };
-    requestAnimationFrame(tick);
+    const frame = { row: anim.row, col };
+    // CPU 优化（v1.2 Task 2）：仅帧号变化才落笔。此前每个 rAF tick（60Hz
+    // ≈3600 次/分、120Hz ProMotion ≈7200 次/分）都做一次 CSSOM 字符串解析
+    // + 样式失效，而 idle 只有 4 帧（fps 3）——绝大多数写入是恒等重写。
+    if (shouldWriteFrame(lastWritten, frame)) {
+      petEl.style.backgroundPosition = offsetFor(anim.row, col);
+      lastWritten = frame;
+      curFrame = frame;
+      spriteWriteCount++;
+    }
+    rafId = requestAnimationFrame(tick);
   };
-  requestAnimationFrame(tick);
+  rafId = requestAnimationFrame(tick);
+}
+
+// ===== Sprite loop pause (v1.2 Task 2, document.hidden) =====
+
+// Hidden → cancel the pending frame: WebKit already stops firing rAF for
+// hidden pages, but canceling makes the stop explicit and drops the queued
+// callback. Only the sprite loop is touched — event listeners and polling are
+// Rust-side (watcher/chat) and never ran in this window's JS anyway.
+// Visible → replay the animation the chain was running (currentAnimName):
+// playAnimation re-bases start at null, so elapsed counts from 0 and the
+// sprite resumes from its first frame instead of jumping across the whole
+// hidden gap.
+function onVisibilityChange(): void {
+  if (document.hidden) {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+      loopPausedByHidden = true;
+      debug("sprite loop paused (hidden)", 5000);
+    }
+  } else if (loopPausedByHidden) {
+    loopPausedByHidden = false;
+    debug("sprite loop resumed (visible) — elapsed re-based", 5000);
+    playAnimation(currentAnimName);
+  }
+}
+
+function setupSpriteLifecycle(): void {
+  document.addEventListener("visibilitychange", onVisibilityChange);
+}
+
+// ===== Sprite write telemetry (v1.2 Task 2, debug.log only) =====
+
+// Low-frequency self-check for the frame-change optimization: every 60s the
+// actual style-write count lands in debug.log (NOT on the debug line) and the
+// counter resets. Expected shape: before = one write per rAF tick (≈3600/min
+// at 60Hz, ≈7200/min on 120Hz ProMotion); after = frame changes only
+// (fps × 60 — idle ≈180/min, working ≈360/min, near-zero while hidden).
+const SPRITE_WRITE_REPORT_INTERVAL_MS = 60_000;
+
+function setupSpriteWriteTelemetry(): void {
+  window.setInterval(() => {
+    void invoke("append_debug", {
+      line: `sprite style writes (60s): ${spriteWriteCount}`,
+    }).catch(() => {});
+    spriteWriteCount = 0;
+  }, SPRITE_WRITE_REPORT_INTERVAL_MS);
 }
 
 // ===== Pixel-accurate hit testing (acceptance round 2) =====
@@ -800,6 +876,8 @@ setupListeners();
 setupChatLog();
 setupChatWindowListeners();
 setupPointerInteractions();
+setupSpriteLifecycle(); // v1.2 Task 2: hidden → pause rAF, visible → resume at elapsed 0
+setupSpriteWriteTelemetry(); // v1.2 Task 2: 60s write-count self-check → debug.log
 // 独立的 loadAlphaMask() 启动调用已并入 mountPet：蒙版跟随实际挂载的
 // spritesheet（含换肤后的新图），pet.json 读不出时蒙版本就无处可用。
 init().catch((err) => showDebug(`failed to load pet: ${errorText(err)}`));

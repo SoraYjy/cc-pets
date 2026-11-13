@@ -11,6 +11,17 @@ export function frameAt(anim: AnimationDef, elapsedMs: number): number {
   return anim.loop ? frame % anim.frames : Math.min(frame, anim.frames - 1);
 }
 
+// 帧去重判定（v1.2 Task 2 CPU 优化，纯函数）：prev 为 null 表示本链尚未写
+// 过任何样式（playAnimation 新闭包的起点，换动画/换肤即重置），必须首写；
+// row 或 col 任一变化才需要再写。rAF tick 用它把「每 tick 一次 style 写」
+// 降为「每帧变化一次」。
+export function shouldWriteFrame(
+  prev: { row: number; col: number } | null,
+  next: { row: number; col: number },
+): boolean {
+  return prev === null || prev.row !== next.row || prev.col !== next.col;
+}
+
 function axisOffset(cellPx: number): string {
   const offset = -cellPx;
   // Avoid "-0px" — JS stringifies negative zero with the minus sign.

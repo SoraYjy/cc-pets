@@ -4,6 +4,7 @@ import {
   frameAt,
   offsetFor,
   resolveSheetPath,
+  shouldWriteFrame,
   type AnimationDef,
   type SkinDef,
 } from "./sprite";
@@ -26,6 +27,28 @@ describe("frameAt", () => {
 
   it("clamps at the last frame for non-looping animations", () => {
     expect(frameAt(done, 2000)).toBe(3);
+  });
+});
+
+describe("shouldWriteFrame", () => {
+  it("always writes when nothing was written yet (prev null)", () => {
+    // 新 playAnimation 链的起点：首帧必写，样式才与动画对齐。
+    expect(shouldWriteFrame(null, { row: 0, col: 0 })).toBe(true);
+    expect(shouldWriteFrame(null, { row: 3, col: 2 })).toBe(true);
+  });
+
+  it("skips the write when row and col are unchanged", () => {
+    const frame = { row: 0, col: 1 };
+    expect(shouldWriteFrame(frame, { row: 0, col: 1 })).toBe(false);
+  });
+
+  it("writes when the column changes within the same row", () => {
+    expect(shouldWriteFrame({ row: 0, col: 1 }, { row: 0, col: 2 })).toBe(true);
+  });
+
+  it("writes when the row changes even at the same column", () => {
+    // idle(0) → working(1) 切行：背景必须重写，不能只看列。
+    expect(shouldWriteFrame({ row: 0, col: 1 }, { row: 1, col: 1 })).toBe(true);
   });
 });
 
