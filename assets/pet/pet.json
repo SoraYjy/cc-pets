@@ -7,7 +7,11 @@
   "skins": {
     "default": {
       "spritesheetPath": "spritesheet.png",
-      "displayName": "像素猫"
+      "displayName": "\u50cf\u7d20\u732b"
+    },
+    "lynn": {
+      "spritesheetPath": "skins/lynn/spritesheet.png",
+      "displayName": "lynn"
     }
   },
   "cellWidth": 192,
