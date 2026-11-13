@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { clampOpacity, normalizeStyle } from "./theme";
+import { clampOpacity, normalizePetSkin, normalizeStyle } from "./theme";
 
 describe("normalizeStyle", () => {
   it("test_normalize_style_valid", () => {
@@ -20,5 +20,18 @@ describe("clampOpacity", () => {
     expect(clampOpacity(0.1)).toBe(0.3);
     expect(clampOpacity(0.7)).toBe(0.7);
     expect(clampOpacity(NaN)).toBe(0.92);
+  });
+});
+
+describe("normalizePetSkin", () => {
+  it("test_normalize_pet_skin_keeps_nonempty", () => {
+    expect(normalizePetSkin("official")).toBe("official");
+    expect(normalizePetSkin(" official ")).toBe("official");
+  });
+
+  it("test_normalize_pet_skin_empty_defaults", () => {
+    expect(normalizePetSkin("")).toBe("default");
+    expect(normalizePetSkin("   ")).toBe("default");
+    expect(normalizePetSkin(undefined)).toBe("default");
   });
 });

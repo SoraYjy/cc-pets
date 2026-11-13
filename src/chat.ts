@@ -7,7 +7,7 @@ import {
 } from "./format";
 import { decideDoneFallback, type ChatEntry } from "./history";
 import { renderMarkdown } from "./markdown";
-import { clampOpacity, normalizeStyle, type ThemeStyle } from "./theme";
+import { clampOpacity, normalizePetSkin, normalizeStyle, type ThemeStyle } from "./theme";
 
 // Backend chat.rs emits { kind: "init" | "text" | "done", text }.
 interface ChatEventPayload {
@@ -389,14 +389,17 @@ window.addEventListener("unhandledrejection", (e) => {
 
 // ===== Settings (v1.1): three themes + window opacity =====
 
-// get_settings payload (src-tauri/src/settings.rs Settings { style, opacity }).
+// get_settings payload (src-tauri/src/settings.rs Settings { style, opacity,
+// petSkin }). petSkin (v1.2) 是宠物皮肤 id，换肤可用集经 get_skins 判断。
 interface SettingsPayload {
   style: string;
   opacity: number;
+  petSkin?: string;
 }
 
 let currentStyle: ThemeStyle = "c";
 let currentOpacity = 0.92;
+let currentSkin = "default";
 
 // apply = swap the body theme class + write the CSS alpha variable. The window
 // background and every theme rule read the class / --win-alpha live, so this
@@ -417,12 +420,14 @@ function applySettings(style: string | undefined, opacity: number): void {
 // Persist current settings; a failed save keeps the applied look and degrades
 // silently to one debug-log line.
 function saveSettings(): void {
-  invoke("save_settings", { style: currentStyle, opacity: currentOpacity }).catch(
-    (err: unknown) => {
-      console.error("save_settings failed:", err);
-      logLine(`[chat] save_settings failed: ${String(err)}`);
-    },
-  );
+  invoke("save_settings", {
+    style: currentStyle,
+    opacity: currentOpacity,
+    petSkin: currentSkin,
+  }).catch((err: unknown) => {
+    console.error("save_settings failed:", err);
+    logLine(`[chat] save_settings failed: ${String(err)}`);
+  });
 }
 
 settingsToggle.addEventListener("click", () => {
@@ -525,7 +530,10 @@ restartBtn.addEventListener("click", () => {
 
 // Startup load; read failure → defaults + one debug line (读不出来不挡聊天).
 void invoke<SettingsPayload>("get_settings")
-  .then((s) => applySettings(s.style, s.opacity))
+  .then((s) => {
+    applySettings(s.style, s.opacity);
+    currentSkin = normalizePetSkin(s.petSkin);
+  })
   .catch((err: unknown) => {
     console.error("get_settings failed, falling back to defaults:", err);
     applySettings("c", 0.92);

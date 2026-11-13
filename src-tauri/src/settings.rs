@@ -1,21 +1,30 @@
 use std::path::{Path, PathBuf};
 
-/// 聊天窗设置：style 三选一（"a"|"b"|"c"，默认 "c"），opacity ∈ [0.3,1.0]（默认 0.92）。
+/// 聊天窗设置：style 三选一（"a"|"b"|"c"，默认 "c"），opacity ∈ [0.3,1.0]（默认 0.92），
+/// petSkin 宠物皮肤 id（默认 "default"，v1.2 多皮肤）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub style: String,
     pub opacity: f32,
+    #[serde(rename = "petSkin", default = "default_pet_skin")]
+    pub pet_skin: String,
 }
 
 const DEFAULT_STYLE: &str = "c";
 const DEFAULT_OPACITY: f32 = 0.92;
 const OPACITY_MIN: f32 = 0.3;
 const OPACITY_MAX: f32 = 1.0;
+const DEFAULT_PET_SKIN: &str = "default";
+
+fn default_pet_skin() -> String {
+    DEFAULT_PET_SKIN.to_string()
+}
 
 fn defaults() -> Settings {
     Settings {
         style: DEFAULT_STYLE.into(),
         opacity: DEFAULT_OPACITY,
+        pet_skin: default_pet_skin(),
     }
 }
 
@@ -40,7 +49,9 @@ pub fn settings_path() -> PathBuf {
 
 /// 宽松加载：文件缺失、JSON 损坏、字段缺失或非法都回默认值——
 /// 设置读不出来不该崩桌面宠，宁可退到 style "c" + opacity 0.92。
-/// style ∉ {"a","b","c"} 归一化 "c"；opacity 越域 clamp 进 [0.3,1.0]。
+/// style ∉ {"a","b","c"} 归一化 "c"；opacity 越域 clamp 进 [0.3,1.0]；
+/// petSkin 空/空白归一化 "default"。petSkin **不**校验在可用皮肤集内——
+/// 后端不知道 assets（皮肤集合归 pet.json 管），可用性由前端判断。
 pub fn load_from(path: &Path) -> Settings {
     let Ok(text) = std::fs::read_to_string(path) else {
         return defaults();
@@ -57,9 +68,14 @@ pub fn load_from(path: &Path) -> Settings {
         .and_then(|o| o.as_f64())
         .map(|o| o as f32)
         .unwrap_or(DEFAULT_OPACITY);
+    let pet_skin = match v.get("petSkin").and_then(|s| s.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => DEFAULT_PET_SKIN.to_string(),
+    };
     Settings {
         style,
         opacity: clamp_opacity(opacity),
+        pet_skin,
     }
 }
 
@@ -89,15 +105,22 @@ pub fn get_settings() -> Settings {
     load()
 }
 
-/// 前端改动设置时保存；style 非法拒收（Err），opacity 越域 clamp 后照存不报错。
+/// 前端改动设置时保存；style 非法拒收（Err），opacity 越域 clamp 后照存不报错，
+/// petSkin 空/空白归一化 "default" 后照存（不校验在皮肤集内，可用性归前端）。
 #[tauri::command]
-pub fn save_settings(style: String, opacity: f32) -> Result<(), String> {
+pub fn save_settings(style: String, opacity: f32, pet_skin: String) -> Result<(), String> {
     if !valid_style(&style) {
         return Err(format!("invalid style: {style} (expected a|b|c)"));
     }
+    let pet_skin = if pet_skin.trim().is_empty() {
+        DEFAULT_PET_SKIN.to_string()
+    } else {
+        pet_skin
+    };
     save(&Settings {
         style,
         opacity: clamp_opacity(opacity),
+        pet_skin,
     })
 }
 
@@ -118,7 +141,8 @@ mod tests {
             load_from(&path),
             Settings {
                 style: "c".into(),
-                opacity: 0.92
+                opacity: 0.92,
+                pet_skin: "default".into()
             }
         );
     }
@@ -131,7 +155,8 @@ mod tests {
             load_from(&path),
             Settings {
                 style: "c".into(),
-                opacity: 0.92
+                opacity: 0.92,
+                pet_skin: "default".into()
             }
         );
     }
@@ -157,12 +182,25 @@ mod tests {
     }
 
     #[test]
+    fn test_load_empty_pet_skin_normalized() {
+        // petSkin 空串 → 回 "default"（手改 settings.json / 旧版本缺字段同理）。
+        // 不校验在皮肤集内：可用集归前端判断（pet.json skins）。
+        let (_dir, path) = tmp("settings.json");
+        std::fs::write(&path, r#"{"style":"a","opacity":0.5,"petSkin":""}"#).expect("write");
+        let s = load_from(&path);
+        assert_eq!(s.style, "a");
+        assert_eq!(s.opacity, 0.5);
+        assert_eq!(s.pet_skin, "default");
+    }
+
+    #[test]
     fn test_save_then_load_roundtrip() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("settings.json");
         let s = Settings {
             style: "b".into(),
             opacity: 0.5,
+            pet_skin: "official".into(),
         };
         save_to(&path, &s).expect("save");
         assert_eq!(load_from(&path), s);

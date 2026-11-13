@@ -24,3 +24,11 @@ export function clampOpacity(n: number): number {
   }
   return Math.min(OPACITY_MAX, Math.max(OPACITY_MIN, n));
 }
+
+// petSkin (v1.2 多皮肤): 空/空白 → "default"，镜像 src-tauri/src/settings.rs
+// 的归一化规则。这里不做可用性校验——皮肤集合归 pet.json 的 skins 映射管，
+// 由 chat.ts 的 get_skins 消费侧判断（设置面板渲染实际存在的芯片）。
+export function normalizePetSkin(s: string | undefined): string {
+  const v = (s ?? "").trim();
+  return v === "" ? "default" : v;
+}
