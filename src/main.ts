@@ -140,12 +140,13 @@ function playAnimation(name: string): void {
 const ALPHA_THRESHOLD = 16; // 0–255; below → transparent → ignore mouse
 
 let sheetAlpha: Uint8ClampedArray | null = null; // RGBA of the whole sheet
+let alphaMaskUrl: string | null = null; // sheet the mask was decoded from
 let ignoringMouse = false;
 let dragging = false; // hoisted so the hit-test probe can pin non-ignore
 
-async function loadAlphaMask(): Promise<void> {
+async function loadAlphaMask(url: string = `${PET_BASE}/spritesheet.png`): Promise<void> {
   try {
-    const res = await fetch(`${PET_BASE}/spritesheet.png`);
+    const res = await fetch(url);
     const bitmap = await createImageBitmap(await res.blob());
     const canvas = document.createElement("canvas");
     canvas.width = SHEET_W;
@@ -154,6 +155,7 @@ async function loadAlphaMask(): Promise<void> {
     if (!ctx) throw new Error("2d context unavailable");
     ctx.drawImage(bitmap, 0, 0);
     sheetAlpha = ctx.getImageData(0, 0, SHEET_W, SHEET_H).data;
+    alphaMaskUrl = url;
   } catch (err) {
     // No mask → hit testing stays off entirely (window behaves as before).
     showDebug(`alpha mask load failed: ${errorText(err)}`);
@@ -257,6 +259,12 @@ interface TurnCompletePayload {
   durationMs: number | null;
 }
 
+// v1.2 多皮肤：chat 窗的 ⚙ 面板点选皮肤芯片后全局广播（chat.ts emit），
+// 本窗监听后重新 loadPet 并重启精灵动画，换肤即时生效、无需重启。
+interface SkinChangedPayload {
+  skinId: string;
+}
+
 // Session-context formatting (acceptance round 4) — projectOf /
 // formatDuration / truncateForNotification live in format.ts (test-infra L1
 // extraction), pure helpers shared with chat.ts.
@@ -318,6 +326,15 @@ function setupListeners(): void {
         debug("notification skipped: permission not granted");
       }
     })().catch((err: unknown) => showDebug(`notification failed: ${errorText(err)}`));
+  });
+
+  // v1.2 多皮肤：settings 面板换肤 → 重新 loadPet（pet.json 重取，新导入的
+  // 皮肤无需重启即可见）+ 换背景图 + 重启精灵动画 + 重载 alpha 命中蒙版。
+  void listen<SkinChangedPayload>("skin-changed", (e) => {
+    debug(`skin-changed: ${e.payload.skinId}`, 5000);
+    mountPet(e.payload.skinId).catch((err: unknown) =>
+      showDebug(`skin switch failed: ${errorText(err)}`),
+    );
   });
 }
 
@@ -735,22 +752,47 @@ function setupPointerInteractions(): void {
   });
 }
 
+// Load pet.json + settings once, then mount with the configured skin.
 async function init(): Promise<void> {
-  const { anims: loaded, sheet } = await loadPet(PET_BASE);
+  // petSkin 来自 settings（load 侧已把空/空白归一化 "default"）；读取失败
+  // 不挡挂载——退默认皮肤（resolveSheetPath 三级回退到根 spritesheetPath）。
+  const settings = await invoke<{ petSkin?: string }>("get_settings").catch(
+    (err: unknown) => {
+      console.error("get_settings failed, using default skin:", err);
+      return null;
+    },
+  );
+  await mountPet(settings?.petSkin);
+}
+
+// (Re)load the spritesheet for petSkin and restart the sprite animation.
+// Startup and every skin-changed pass through here: pet.json is re-fetched
+// so a freshly imported skin (import script) needs no app restart, and
+// resolveSheetPath falls back to the default skin when the id is unknown.
+async function mountPet(petSkin?: string): Promise<void> {
+  const { anims: loaded, sheet } = await loadPet(PET_BASE, petSkin);
   anims = loaded;
 
-  const el = document.createElement("div");
-  el.id = "pet";
-  el.style.width = `${CELL_W}px`;
-  el.style.height = `${CELL_H}px`;
-  el.style.backgroundImage = `url(${sheet})`;
-  el.style.backgroundSize = `${SHEET_W}px ${SHEET_H}px`;
-  el.style.backgroundRepeat = "no-repeat";
-  el.style.imageRendering = "pixelated";
-  document.body.appendChild(el);
-  petEl = el;
+  if (!petEl) {
+    const el = document.createElement("div");
+    el.id = "pet";
+    el.style.width = `${CELL_W}px`;
+    el.style.height = `${CELL_H}px`;
+    el.style.backgroundSize = `${SHEET_W}px ${SHEET_H}px`;
+    el.style.backgroundRepeat = "no-repeat";
+    el.style.imageRendering = "pixelated";
+    document.body.appendChild(el);
+    petEl = el;
+  }
+  petEl.style.backgroundImage = `url(${sheet})`;
 
-  playAnimation(sessionAnimName);
+  // 皮肤切换后蒙版跟手：仅当 sheet 实际变了才重解码（启动路径与底部的
+  // 独立 loadAlphaMask() 同 URL 时不会二次 fetch）。
+  if (alphaMaskUrl !== sheet) {
+    void loadAlphaMask(sheet);
+  }
+
+  playAnimation(sessionAnimName); // 重启精灵动画（换肤即时生效）
 }
 
 setupGlobalErrorHooks();
@@ -758,5 +800,6 @@ setupListeners();
 setupChatLog();
 setupChatWindowListeners();
 setupPointerInteractions();
+// 独立的 loadAlphaMask() 启动调用已并入 mountPet：蒙版跟随实际挂载的
+// spritesheet（含换肤后的新图），pet.json 读不出时蒙版本就无处可用。
 init().catch((err) => showDebug(`failed to load pet: ${errorText(err)}`));
-void loadAlphaMask(); // independent of pet.json; failure keeps old behavior

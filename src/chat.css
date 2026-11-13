@@ -723,6 +723,31 @@ body.theme-c #settings-panel {
   font-weight: 600;
 }
 
+/* 皮肤芯片组（v1.2 多皮肤）：复用 .chip 家族样式；容器可换行——皮肤数随
+   导入增长，不像主题芯片固定三枚，所以不平均拉伸（flex:none + 允许 wrap）。 */
+.skin-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.skin-label {
+  flex: none;
+  opacity: 0.6;
+}
+
+.skin-chips {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.skin-chips .chip {
+  flex: none;
+  min-width: 3em;
+}
+
 .alpha-row {
   display: flex;
   align-items: center;

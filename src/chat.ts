@@ -38,6 +38,7 @@ const alphaValue = document.getElementById("alpha-value") as HTMLElement;
 const styleChips = Array.from(document.querySelectorAll<HTMLButtonElement>(".chip"));
 const clearBtn = document.getElementById("clear-screen") as HTMLButtonElement;
 const restartBtn = document.getElementById("restart-session") as HTMLButtonElement;
+const skinChipsEl = document.getElementById("skin-chips") as HTMLElement;
 
 let sending = false;
 let streamingBubble: HTMLElement | null = null;
@@ -434,13 +435,78 @@ settingsToggle.addEventListener("click", () => {
   settingsPanel.hidden = !settingsPanel.hidden;
 });
 
-// 风格芯片：点选即 apply（换主题类）+ save（opacity 保持当前值）。
+// 风格芯片：点选即 apply（换主题类）+ save（opacity/petSkin 保持当前值）。
 for (const chip of styleChips) {
   chip.addEventListener("click", () => {
     applySettings(chip.dataset.style, currentOpacity);
     saveSettings();
   });
 }
+
+// ===== 皮肤芯片（v1.2 多皮肤）=====
+
+// get_skins payload（src-tauri/src/skins.rs）：pet.json skins 映射，
+// id（= settings.petSkin 值）→ { spritesheetPath, displayName }。
+interface SkinDefPayload {
+  spritesheetPath: string;
+  displayName: string;
+}
+
+type SkinsPayload = Record<string, SkinDefPayload>;
+
+// 点选皮肤：本地态更新 + save（持久化 petSkin）+ 全局广播 skin-changed——
+// pet 窗监听后重新 loadPet 并重启精灵动画，换肤即时生效、无需重启
+// （emit 全局事件是最简通路：pet 窗本就有 listen 基建，无需经后端转发）。
+function selectSkin(id: string): void {
+  if (id === currentSkin) return;
+  currentSkin = id;
+  syncSkinChipActive();
+  saveSettings();
+  void emit("skin-changed", { skinId: id }).catch((err: unknown) => {
+    console.error("skin-changed emit failed:", err);
+    logLine(`[chat] skin-changed emit failed: ${String(err)}`);
+  });
+}
+
+function syncSkinChipActive(): void {
+  for (const chip of skinChipsEl.querySelectorAll<HTMLButtonElement>(".chip")) {
+    chip.classList.toggle("active", chip.dataset.skin === currentSkin);
+  }
+}
+
+// 芯片从 get_skins 动态渲染（皮肤数随导入增长，不写死 HTML）；
+// displayName 取 pet.json skins 映射，空则退回 id。
+function renderSkinChips(skins: SkinsPayload): void {
+  skinChipsEl.textContent = "";
+  for (const [id, def] of Object.entries(skins)) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.dataset.skin = id;
+    chip.textContent = def.displayName || id;
+    chip.addEventListener("click", () => selectSkin(id));
+    skinChipsEl.appendChild(chip);
+  }
+  syncSkinChipActive();
+}
+
+void invoke<SkinsPayload>("get_skins")
+  .then((skins) => {
+    // 可用集在前端判断：settings 里的 petSkin 若不在 skins 集 → 回 default
+    // 并在重启后随保存归位（Rust 侧刻意不校验，见 settings.rs）。
+    if (Object.keys(skins).length > 0 && !skins[currentSkin]) {
+      currentSkin = "default";
+    }
+    renderSkinChips(skins);
+  })
+  .catch((err: unknown) => {
+    // get_skins 失败（pet.json 读不出）：退一枚 default 芯片，面板仍可用。
+    console.error("get_skins failed:", err);
+    logLine(`[chat] get_skins failed: ${String(err)}`);
+    renderSkinChips({
+      default: { spritesheetPath: "spritesheet.png", displayName: "默认" },
+    });
+  });
 
 // 透明度滑杆：input 即时 apply（只动 --win-alpha，拖动全程平滑），change 才 save。
 alphaRange.addEventListener("input", () => {
@@ -529,10 +595,13 @@ restartBtn.addEventListener("click", () => {
 });
 
 // Startup load; read failure → defaults + one debug line (读不出来不挡聊天).
+// get_settings 与 get_skins 互相独立、到达顺序不定：两路各自落 currentSkin /
+// 芯片 DOM，后到的 syncSkinChipActive 兜住高亮，不会互相覆盖。
 void invoke<SettingsPayload>("get_settings")
   .then((s) => {
     applySettings(s.style, s.opacity);
     currentSkin = normalizePetSkin(s.petSkin);
+    syncSkinChipActive();
   })
   .catch((err: unknown) => {
     console.error("get_settings failed, falling back to defaults:", err);

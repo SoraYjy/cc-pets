@@ -26,11 +26,36 @@ export interface Pet {
   sheet: string;
 }
 
-export async function loadPet(baseUrl: string): Promise<Pet> {
+// pet.json 的 skins 映射条目（v1.2 多皮肤）。所有皮肤共用同一网格规格，
+// 只有 spritesheet 图不同。
+export interface SkinDef {
+  spritesheetPath: string;
+  displayName: string;
+}
+
+// 皮肤解析（纯函数，v1.2）：skins[petSkin] → skins.default → 根
+// spritesheetPath 三级回退。petSkin 不在 skins 集（手改 settings.json / 皮肤
+// 被删）或为空 → 回 default；连 skins 映射都没有（旧版单皮肤）→ 回根路径。
+export function resolveSheetPath(
+  skins: Record<string, SkinDef> | undefined,
+  rootPath: string | undefined,
+  petSkin: string | undefined,
+): string {
+  const fromSkin = petSkin ? skins?.[petSkin]?.spritesheetPath : undefined;
+  if (fromSkin) return fromSkin;
+  const fromDefault = skins?.default?.spritesheetPath;
+  if (fromDefault) return fromDefault;
+  return rootPath ?? "spritesheet.png";
+}
+
+export async function loadPet(baseUrl: string, petSkin?: string): Promise<Pet> {
   const res = await fetch(`${baseUrl}/pet.json`);
   if (!res.ok) {
     throw new Error(`Failed to load pet.json from ${baseUrl}: ${res.status}`);
   }
   const json = await res.json();
-  return { anims: json.animations, sheet: `${baseUrl}/${json.spritesheetPath}` };
+  return {
+    anims: json.animations,
+    sheet: `${baseUrl}/${resolveSheetPath(json.skins, json.spritesheetPath, petSkin)}`,
+  };
 }
