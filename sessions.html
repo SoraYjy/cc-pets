@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/sessions.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lynn Sessions</title>
+    <script type="module" src="/src/sessions.ts" defer></script>
+  </head>
+  <body>
+    <main id="sessions">
+      <header id="sessions-header">
+        <span>会话</span>
+        <button id="close" type="button" title="关闭 (Esc)">×</button>
+      </header>
+      <section id="session-list">
+        <!-- 首帧兜底：首个快照到达前（≤2s）与空列表共用同一空态文案 -->
+        <div class="empty">没有运行中的会话</div>
+      </section>
+    </main>
+  </body>
+</html>

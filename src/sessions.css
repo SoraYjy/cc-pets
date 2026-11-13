@@ -1,0 +1,148 @@
+/* Sessions panel (v1.2 Task 4) — right-click on the pet toggles it.
+   Deliberately NOT tied to the chat window's three themes: this is a status
+   surface with its own independent dark style (one fixed look, no settings). */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+}
+
+#sessions {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: rgba(24, 28, 40, 0.96);
+  border: 1px solid rgba(143, 168, 204, 0.25);
+  border-radius: 12px;
+  overflow: hidden;
+  color: #cfd6e8;
+  font-family: ui-sans-serif, -apple-system, "PingFang SC", "Hiragino Sans GB", sans-serif;
+  font-size: 12px;
+}
+
+#sessions-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 8px 6px 12px;
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+#sessions-header button {
+  border: none;
+  background: transparent;
+  color: rgba(207, 214, 232, 0.4);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+#sessions-header button:hover {
+  color: rgba(207, 214, 232, 0.9);
+}
+
+#session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2px 8px 10px;
+}
+
+#session-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+#session-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+/* One row = status dot + project/session names + relative activity time. */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  margin-bottom: 2px;
+}
+
+.row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Status dot: busy = green breathing, idle = static gray. */
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot.idle {
+  background: #5b6478;
+}
+
+.dot.busy {
+  background: #4ade80;
+  animation: breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.85);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0; /* lets the ellipsis work inside the flex row */
+}
+
+.project {
+  font-weight: 600;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.name {
+  font-size: 10.5px;
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ago {
+  flex: none;
+  margin-left: auto;
+  font-size: 10.5px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  text-align: center;
+  opacity: 0.5;
+  padding: 24px 0;
+}

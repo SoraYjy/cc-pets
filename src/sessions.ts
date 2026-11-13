@@ -1,0 +1,130 @@
+// Sessions panel (v1.2 Task 4): pure display of the watcher's
+// sessions-snapshot stream — one row per live Claude Code session (status
+// dot + project + session name + relative activity time). No input, no
+// light-dismiss: the panel closes via ×/Esc (hide lifecycle, same as the
+// chat bubble) and is toggled by right-clicking the pet (main.ts).
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { projectOf } from "./format";
+
+// Same wire shape watcher.rs emits (the pet window re-emits its stored copy
+// as a creation catch-up with the identical shape).
+interface SessionRow {
+  sessionId: string;
+  cwd: string;
+  name: string;
+  status: string;
+  updatedAtMs: number;
+}
+
+interface SessionsSnapshotPayload {
+  sessions: SessionRow[];
+}
+
+const listEl = document.getElementById("session-list") as HTMLElement;
+const closeBtn = document.getElementById("close") as HTMLButtonElement;
+
+// Latest snapshot; re-rendered by the snapshot listener AND by a 1s local
+// tick (the relative "3s 前" column ages even between poller ticks).
+let latest: SessionsSnapshotPayload | null = null;
+
+// Display order: busy first, then project name, then session name (the
+// payload order is read_dir order — explicitly not stable, per the contract).
+function compareRows(a: SessionRow, b: SessionRow): number {
+  const busyOf = (r: SessionRow): number => (r.status === "busy" ? 0 : 1);
+  return (
+    busyOf(a) - busyOf(b) ||
+    projectOf(a.cwd).localeCompare(projectOf(b.cwd)) ||
+    a.name.localeCompare(b.name) ||
+    a.sessionId.localeCompare(b.sessionId)
+  );
+}
+
+// Age of the last registry heartbeat, coarse-grained on purpose: the
+// panel is a glance surface, seconds precision below a minute is enough.
+function relativeAge(ms: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return `${s}s 前`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m 前`;
+  return `${Math.floor(m / 60)}h 前`;
+}
+
+// Clear-then-redraw, strictly idempotent: duplicate snapshot deliveries
+// (poller broadcast + pet catch-up re-emits) render the same DOM.
+function render(): void {
+  const rows = [...(latest?.sessions ?? [])].sort(compareRows);
+  listEl.textContent = ""; // clears all children
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "没有运行中的会话";
+    listEl.appendChild(empty);
+    return;
+  }
+  for (const row of rows) {
+    const el = document.createElement("div");
+    el.className = "row";
+    // Names/cwd come from the session registry files (external data) —
+    // built via createElement/textContent only, no innerHTML anywhere.
+    el.title = `${row.name} · ${row.cwd}`;
+    const dot = document.createElement("span");
+    dot.className = `dot ${row.status === "busy" ? "busy" : "idle"}`;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const project = document.createElement("span");
+    project.className = "project";
+    project.textContent = projectOf(row.cwd);
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = row.name;
+    meta.append(project, name);
+    const ago = document.createElement("span");
+    ago.className = "ago";
+    ago.textContent = relativeAge(row.updatedAtMs);
+    el.append(dot, meta, ago);
+    listEl.appendChild(el);
+  }
+}
+
+void listen<SessionsSnapshotPayload>("sessions-snapshot", (e) => {
+  latest = e.payload;
+  render();
+});
+window.setInterval(render, 1000); // relative-time aging between ticks
+
+// ===== Close entries (chat 同款)：× / Esc → hide，窗口不销毁 =====
+// 无 light-dismiss（刻意）：面板是瞥一眼的状态面，失焦不关；焦点在面板上时
+// Esc 才收得到（show 链路带 setFocus，右键呼出后 Esc 即可用）。
+function logLine(text: string): void {
+  void invoke("append_debug", { line: text }).catch(() => {});
+}
+
+function hidePanel(): void {
+  getCurrentWindow()
+    .hide()
+    .catch((err: unknown) => {
+      console.error("sessions hide() failed:", err);
+      logLine(`[sessions] hide() failed: ${String(err)}`);
+    });
+}
+
+closeBtn.addEventListener("click", hidePanel);
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "Escape") hidePanel();
+});
+
+// Diagnostics: exceptions that used to be console-only land in debug.log
+// (same rationale as the chat window's hooks — no debug line in this window).
+window.addEventListener("error", (e) => {
+  console.error("sessions window error:", e.message);
+  logLine(`[sessions] window error: ${e.message}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  console.error("sessions unhandled rejection:", e.reason);
+  logLine(`[sessions] unhandled rejection: ${String(e.reason)}`);
+});
+
+logLine(`[sessions] sessions window loaded @ ${new Date().toLocaleTimeString()}`);

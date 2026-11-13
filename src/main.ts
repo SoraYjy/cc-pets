@@ -35,6 +35,13 @@ const CHAT_WIDTH = 340;
 const CHAT_HEIGHT = 420;
 const CHAT_GAP_PX = 8; // clearance between pet and bubble
 
+// v1.2 Task 4: sessions panel — right-click on the pet toggles it. The window
+// lifecycle copies the chat mode (hide/show, never destroyed; created visible;
+// closed from inside via ×/Esc, no light-dismiss).
+const SESSIONS_LABEL = "sessions";
+const SESSIONS_WIDTH = 320;
+const SESSIONS_HEIGHT = 380;
+
 // Light-dismiss (acceptance round 5): both close paths — the bubble's own
 // blur-close and the pet's toggle-close — stamp chatClosedAt; a pet click
 // inside the grace window right after a close is ignored, so the losing
@@ -353,6 +360,25 @@ interface SkinChangedPayload {
   skinId: string;
 }
 
+// v1.2 Task 4: watcher 每 tick 对 alive 列表整体 emit 的会话快照（多会话
+// 视图面板的数据源；pet 自有 chat 进程沿用 self_pids 过滤、不在其中）。
+interface SessionRow {
+  sessionId: string;
+  cwd: string;
+  name: string;
+  status: string;
+  updatedAtMs: number;
+}
+
+interface SessionsSnapshotPayload {
+  sessions: SessionRow[];
+}
+
+// 最新一份快照（v1.2 Task 4）：面板本身在 sessions 窗，pet 窗只存一份数据，
+// 用于新开面板时的补发——窗口 created 派发时新页面 listen 往往尚未注册，
+// 首批补发被安全丢弃，front-loaded 重发兜住（与 chat-history 同机制）。
+let latestSessions: SessionsSnapshotPayload | null = null;
+
 // Session-context formatting (acceptance round 4) — projectOf /
 // formatDuration / truncateForNotification live in format.ts (test-infra L1
 // extraction), pure helpers shared with chat.ts.
@@ -436,6 +462,12 @@ function setupListeners(): void {
     mountPet(e.payload.skinId).catch((err: unknown) =>
       showDebug(`skin switch failed: ${errorText(err)}`),
     );
+  });
+
+  // v1.2 Task 4: 每 tick 的会话快照只落「最新一份」（见 latestSessions），
+  // 渲染是 sessions 窗自己的事；本窗监听仅为新开面板补发数据。
+  void listen<SessionsSnapshotPayload>("sessions-snapshot", (e) => {
+    latestSessions = e.payload;
   });
 
   // v1.2 Task 3: pet 窗聚焦 = 应用被激活（点通知 / Cmd-Tab 切回 / Dock 点击
@@ -611,6 +643,77 @@ function setupChatWindowListeners(): void {
   void listen("tauri://error", (e) => onChatWindowError(e.payload));
 }
 
+// Geometry probe shared by the chat bubble and the sessions panel (v1.2
+// Task 4: extracted verbatim from openChatWindow so both windows place
+// themselves the same way): top-left corner for a w×h window centered above
+// the pet with an 8px gap — no headroom above → to the pet's right; right
+// overflows → to the pet's left; final clamp into the monitor. All geometry
+// is computed in LOGICAL pixels: outerPosition/outerSize/monitor metrics come
+// back in physical pixels while the constructor options are logical — round 1
+// mixed the two and the bubble landed half off-screen. Each probe reports its
+// own failure — a silent `catch(() => null)` would leave the caller hanging
+// with no visible trace; on failure the coordinate stays undefined and the
+// OS picks the placement.
+async function positionNearPet(
+  width: number,
+  height: number,
+): Promise<{ x?: number; y?: number }> {
+  let x: number | undefined;
+  let y: number | undefined;
+  const petWin = getCurrentWindow();
+  const [mon, petPos, petSize, probeSf] = await Promise.all([
+    currentMonitor().catch((err: unknown) => {
+      showDebug(`currentMonitor failed: ${errorText(err)}`);
+      return null;
+    }),
+    petWin.outerPosition().catch((err: unknown) => {
+      showDebug(`outerPosition failed: ${errorText(err)}`);
+      return null;
+    }),
+    petWin.outerSize().catch((err: unknown) => {
+      showDebug(`outerSize failed: ${errorText(err)}`);
+      return null;
+    }),
+    // Acceptance-fix-9: probed in parallel instead of a serial follow-up await.
+    petWin.scaleFactor().catch((err: unknown) => {
+      showDebug(`scaleFactor failed: ${errorText(err)}`);
+      return 1;
+    }),
+  ]);
+  const sf = mon?.scaleFactor ?? probeSf ?? 1;
+  if (petPos && petSize) {
+    const petL = {
+      x: petPos.x / sf,
+      y: petPos.y / sf,
+      w: petSize.width / sf,
+      h: petSize.height / sf,
+    };
+    x = Math.round(petL.x + (petL.w - width) / 2);
+    y = Math.round(petL.y - CHAT_GAP_PX - height);
+    if (mon) {
+      const monL = {
+        x: mon.position.x / sf,
+        y: mon.position.y / sf,
+        w: mon.size.width / sf,
+        h: mon.size.height / sf,
+      };
+      if (y < monL.y) {
+        // no headroom above → try to the right of the pet
+        x = Math.round(petL.x + petL.w + CHAT_GAP_PX);
+        y = Math.round(petL.y);
+        if (x + width > monL.x + monL.w) {
+          // right overflows → try to the left of the pet
+          x = Math.round(petL.x - width - CHAT_GAP_PX);
+        }
+      }
+      // final clamp into the monitor; without a monitor skip it entirely
+      x = Math.min(Math.max(x, monL.x), monL.x + monL.w - width);
+      y = Math.min(Math.max(y, monL.y), monL.y + monL.h - height);
+    }
+  }
+  return { x, y };
+}
+
 async function openChatWindow(): Promise<void> {
   debug("opening chat window…");
 
@@ -647,65 +750,9 @@ async function openChatWindow(): Promise<void> {
   }
   debug("creating chat window…");
 
-  // Preferred spot: centered above the pet with an 8px gap. All geometry is
-  // computed in LOGICAL pixels: outerPosition/outerSize/monitor metrics come
-  // back in physical pixels while the constructor options are logical —
-  // round 1 mixed the two and the bubble landed half off-screen.
-  // Each probe reports its own failure — a silent `catch(() => null)` here
-  // would leave the chain hanging with no visible trace.
-  let x: number | undefined;
-  let y: number | undefined;
-  const petWin = getCurrentWindow();
-  const [mon, petPos, petSize, probeSf] = await Promise.all([
-    currentMonitor().catch((err: unknown) => {
-      showDebug(`currentMonitor failed: ${errorText(err)}`);
-      return null;
-    }),
-    petWin.outerPosition().catch((err: unknown) => {
-      showDebug(`outerPosition failed: ${errorText(err)}`);
-      return null;
-    }),
-    petWin.outerSize().catch((err: unknown) => {
-      showDebug(`outerSize failed: ${errorText(err)}`);
-      return null;
-    }),
-    // Acceptance-fix-9: probed in parallel instead of a serial follow-up await.
-    petWin.scaleFactor().catch((err: unknown) => {
-      showDebug(`scaleFactor failed: ${errorText(err)}`);
-      return 1;
-    }),
-  ]);
-  const sf = mon?.scaleFactor ?? probeSf ?? 1;
-  if (petPos && petSize) {
-    const petL = {
-      x: petPos.x / sf,
-      y: petPos.y / sf,
-      w: petSize.width / sf,
-      h: petSize.height / sf,
-    };
-    x = Math.round(petL.x + (petL.w - CHAT_WIDTH) / 2);
-    y = Math.round(petL.y - CHAT_GAP_PX - CHAT_HEIGHT);
-    if (mon) {
-      const monL = {
-        x: mon.position.x / sf,
-        y: mon.position.y / sf,
-        w: mon.size.width / sf,
-        h: mon.size.height / sf,
-      };
-      if (y < monL.y) {
-        // no headroom above → try to the right of the pet
-        x = Math.round(petL.x + petL.w + CHAT_GAP_PX);
-        y = Math.round(petL.y);
-        if (x + CHAT_WIDTH > monL.x + monL.w) {
-          // right overflows → try to the left of the pet
-          x = Math.round(petL.x - CHAT_WIDTH - CHAT_GAP_PX);
-        }
-      }
-      // final clamp into the monitor; without a monitor skip it entirely
-      x = Math.min(Math.max(x, monL.x), monL.x + monL.w - CHAT_WIDTH);
-      y = Math.min(Math.max(y, monL.y), monL.y + monL.h - CHAT_HEIGHT);
-    }
-  }
+  // Preferred spot: centered above the pet with an 8px gap (shared probe —
+  // see positionNearPet; v1.2 Task 4 extracted it for the sessions panel).
+  const { x, y } = await positionNearPet(CHAT_WIDTH, CHAT_HEIGHT);
 
   // Outcome listeners are in place around the constructor (see above): the
   // instance handlers catch the api's local dispatch, the global handlers any
@@ -847,6 +894,126 @@ function markBubbleShown(): void {
   bubbleShownSinceNotification = true;
 }
 
+// ===== Sessions panel window (v1.2 Task 4) =====
+
+// Right-click on the pet toggles the sessions panel. Lifecycle copies the
+// chat mode (acceptance-fix-9): the webview is created visible and never
+// destroyed — toggle = hidden ? show : hide, no page reload either way. The
+// panel closes itself via ×/Esc (hide); deliberately NO light-dismiss (a
+// status surface you glance at, not a conversation you type into — focus
+// loss must not close it).
+
+// 轻量兜底（chat 窗 round-6 连点双开 bug 的同款最小防线）：两次快速右键不
+// 得在同一个 "sessions" label 下启动两个 webview。不照搬 chat 的整条串行
+// 链——面板无 spawn/进程耦合，in-flight 旗标足够盖住创建竞态。
+let sessionsCreateInFlight = false;
+
+// Fresh-panel data line: the pet window re-pushes its stored snapshot to a
+// newly created panel. created 派发时新页面的 listen 尚未注册——front-loaded
+// 补发（同 emitChatHistory 的 100/250/500/1000/2000ms 节拍）桥接这个空窗，
+// 早到的投递被安全丢弃；面板 clear-then-redraw，重复投递无害。没有快照
+// （应用刚起、首 tick 未到）则跳过——轮询器 ≤2s 后自然接管。
+function emitSessionsSnapshotCatchUp(): void {
+  if (!latestSessions) return;
+  const push = (): void => {
+    void emit("sessions-snapshot", latestSessions).catch((err: unknown) =>
+      console.error("sessions-snapshot re-emit failed:", err),
+    );
+  };
+  push();
+  for (const delayMs of [100, 250, 500, 1000, 2000]) {
+    setTimeout(push, delayMs);
+  }
+}
+
+async function toggleSessionsWindow(): Promise<void> {
+  let existing: WebviewWindow | null = null;
+  try {
+    existing = await WebviewWindow.getByLabel(SESSIONS_LABEL);
+  } catch (err) {
+    // Keep going: fall through to the open path below.
+    showDebug(`sessions getByLabel failed: ${errorText(err)}`);
+  }
+  if (existing) {
+    // Hide/show lifecycle: visibility probe failure counts as hidden — the
+    // toggle then shows (worst case a redundant show, never a stuck panel).
+    const visible = await existing.isVisible().catch(() => false);
+    if (visible) {
+      debug("sessions visible → hide (toggle)", 5000);
+      await existing
+        .hide()
+        .catch((err: unknown) => showDebug(`sessions hide failed: ${errorText(err)}`));
+      return;
+    }
+    debug("sessions hidden → show", 5000);
+    await existing
+      .unminimize()
+      .catch((err: unknown) => showDebug(`sessions unminimize failed: ${errorText(err)}`));
+    await existing
+      .show()
+      .catch((err: unknown) => showDebug(`sessions show failed: ${errorText(err)}`));
+    await existing
+      .setFocus()
+      .catch((err: unknown) => showDebug(`sessions setFocus failed: ${errorText(err)}`));
+    reassertPetOnTop();
+    return;
+  }
+  if (sessionsCreateInFlight) {
+    debug("sessions create already in flight → skip", 5000);
+    return;
+  }
+  debug("creating sessions window…");
+  sessionsCreateInFlight = true;
+  const { x, y } = await positionNearPet(SESSIONS_WIDTH, SESSIONS_HEIGHT);
+  // Same constructor options as the chat bubble (alwaysOnTop / skipTaskbar /
+  // visibleOnAllWorkspaces / acceptFirstMouse); created visible by default.
+  const sessions = new WebviewWindow(SESSIONS_LABEL, {
+    url: "sessions.html",
+    x,
+    y,
+    width: SESSIONS_WIDTH,
+    height: SESSIONS_HEIGHT,
+    decorations: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    visibleOnAllWorkspaces: true,
+    acceptFirstMouse: true,
+  });
+  // Instance outcome handlers (see the chat block: these two are "local"
+  // events dispatched only to handlers registered on the instance; without
+  // them a failed create is swallowed silently).
+  void sessions.once("tauri://created", () => {
+    sessionsCreateInFlight = false;
+    setDebugLine("sessions window created", 5000);
+    emitSessionsSnapshotCatchUp();
+    // Two alwaysOnTop windows stack by creation order — re-assert the pet's
+    // level so the cat stays above the panel (same as the chat window).
+    reassertPetOnTop();
+  });
+  void sessions.once("tauri://error", (e) => {
+    sessionsCreateInFlight = false;
+    showDebug(`sessions window error: ${errorText(e.payload)}`);
+  });
+}
+
+// v1.2 Task 4: 右键呼出/收起面板。与左键互不干扰的结构性保证：左键的
+// click/drag 状态机在 setupPointerInteractions 里对 mousedown/mouseup 都有
+// `e.button === 0` 门——右键按下根本不会进入该状态机；contextmenu 是独立
+// 事件（macOS WebKit 仅 button 2 触发），两条通路无共享可变状态。唯一例外
+// 是左键拖拽进行中——此时右键保持惰性（不 preventDefault 之外的任何动作），
+// 两个手势互不劫持。
+function setupSessionsToggle(): void {
+  document.addEventListener("contextmenu", (e: MouseEvent) => {
+    e.preventDefault(); // 桌宠不弹系统右键菜单
+    if (dragging) return; // 左键拖拽进行中：右键不做事
+    toggleSessionsWindow().catch((err: unknown) =>
+      showDebug(`toggleSessionsWindow failed: ${errorText(err)}`),
+    );
+  });
+}
+
 // 全局错误钩子（round 5）：未捕获异常/拒绝以前只进控制台、静默丢失——
 // 现在也上 debug line 并落日志，× 关闭失灵这类问题才留得下时间线证据。
 function setupGlobalErrorHooks(): void {
@@ -953,6 +1120,7 @@ setupListeners();
 setupChatLog();
 setupChatWindowListeners();
 setupPointerInteractions();
+setupSessionsToggle(); // v1.2 Task 4: 右键猫 → toggle 会话面板
 setupSpriteLifecycle(); // v1.2 Task 2: hidden → pause rAF, visible → resume at elapsed 0
 setupSpriteWriteTelemetry(); // v1.2 Task 2: 60s write-count self-check → debug.log
 // 独立的 loadAlphaMask() 启动调用已并入 mountPet：蒙版跟随实际挂载的

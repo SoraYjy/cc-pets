@@ -169,8 +169,9 @@ fn truncate_chars(s: &str, max: usize) -> String {
 /// 轮询循环：每 tick 扫描 `~/.claude/sessions/*.json`，聚合 working 状态发
 /// `session-status`（首 tick 及变化时）；对每个存活 session 增量尾读
 /// transcript，遇 turn_duration 行发 `turn-complete`（携带最近一次 end_turn
-/// 文本摘要，截断 4000 字符；系统通知由前端自行再截 200）。stop 置真后立即返回（分段 sleep，停止延迟
-/// ≤200ms 有界）。
+/// 文本摘要，截断 4000 字符；系统通知由前端自行再截 200）。tick 末尾对
+/// alive 列表整体发 `sessions-snapshot`（v1.2 Task 4：多会话视图面板数据源）。
+/// stop 置真后立即返回（分段 sleep，停止延迟 ≤200ms 有界）。
 pub fn run_poller<E>(
     claude_dir: &Path,
     self_pids: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
@@ -198,7 +199,10 @@ pub fn run_poller<E>(
         }
 
         // ---- 1. 扫描 sessions/*.json，过滤出存活且新鲜的 session ----
-        let mut alive: Vec<(String, String, String)> = Vec::new(); // (sessionId, cwd, name)
+        // v1.2 Task 4：元组扩到五字段（sessionId, cwd, name, status,
+        // updatedAtMs）——sessions-snapshot 需要完整行数据，working 聚合与
+        // 尾读取用前三项不变。
+        let mut alive: Vec<(String, String, String, String, u64)> = Vec::new();
         let mut any_busy = false;
         if let Ok(dir) = std::fs::read_dir(claude_dir.join("sessions")) {
             for entry in dir.flatten() {
@@ -225,7 +229,7 @@ pub fn run_poller<E>(
                 if e.status == "busy" {
                     any_busy = true;
                 }
-                alive.push((e.session_id, e.cwd, e.name));
+                alive.push((e.session_id, e.cwd, e.name, e.status, e.updated_at_ms));
             }
         }
 
@@ -240,7 +244,7 @@ pub fn run_poller<E>(
         }
 
         // ---- 3. 逐存活 session 增量尾读 transcript ----
-        for (sid, cwd, name) in &alive {
+        for (sid, cwd, name, ..) in &alive {
             let path = claude_dir
                 .join("projects")
                 .join(encode_cwd(cwd))
@@ -334,7 +338,30 @@ pub fn run_poller<E>(
         // 注册表条目数），内存可忽略；staleness 本身仍继续拦截 pid 回绕
         // （陈旧条目 updatedAt 老，不因 pid 复活变新鲜）。
 
-        // ---- 5. 分段 sleep：每 ≤200ms 查一次 stop，保证停止延迟有界 ----
+        // ---- 5. sessions-snapshot（v1.2 Task 4）：每 tick 末尾对 alive 列表
+        // 整体 emit——右键猫呼出的会话面板数据源。payload 小（N×5 字段），
+        // 2s 一次可接受；不做增量/去抖，面板按 status+project 排序自渲染。
+        // pet 自有 chat 进程（self_pids）沿用既有过滤、不进 alive——快照如实
+        // 反映「对外可见的活跃 session」；行顺序即 read_dir 顺序，不保证。
+        emit(
+            "sessions-snapshot",
+            serde_json::json!({
+                "sessions": alive
+                    .iter()
+                    .map(|(sid, cwd, name, status, updated_at_ms)| {
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "cwd": cwd,
+                            "name": name,
+                            "status": status,
+                            "updatedAtMs": updated_at_ms,
+                        })
+                    })
+                    .collect::<Vec<serde_json::Value>>(),
+            }),
+        );
+
+        // ---- 6. 分段 sleep：每 ≤200ms 查一次 stop，保证停止延迟有界 ----
         let deadline = std::time::Instant::now() + interval;
         while !stop.load(std::sync::atomic::Ordering::Relaxed) {
             let now = std::time::Instant::now();
@@ -709,6 +736,34 @@ mod poller_tests {
 
     // ===== L3 场景级 golden（测试基建）=====
 
+    /// snapshot payload 里的 sessionId 列表（按字典序排——alive 顺序即
+    /// read_dir 顺序不保证，前端按 status+project 排序显示）。
+    fn snapshot_session_ids(v: &serde_json::Value) -> Vec<String> {
+        let mut ids: Vec<String> = v["sessions"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s["sessionId"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    }
+
+    /// sessions 数组按 sessionId 排序后的副本，供集合式全等比较（顺序不进断言）。
+    fn snapshot_sessions_sorted(v: &serde_json::Value) -> Vec<serde_json::Value> {
+        let mut arr: Vec<serde_json::Value> =
+            v["sessions"].as_array().cloned().unwrap_or_default();
+        arr.sort_by_key(|s| s["sessionId"].as_str().unwrap_or("").to_string());
+        arr
+    }
+
+    /// snapshot 是否与期望的 sessions 数组集合式相等（排序后比较）。
+    fn snapshot_matches(v: &serde_json::Value, expected: &serde_json::Value) -> bool {
+        snapshot_sessions_sorted(v) == snapshot_sessions_sorted(expected)
+    }
+
     /// 带超时等一个满足谓词的事件，途中把路过的每个事件都记进 `seen`
     /// （golden 序列断言需要全程无丢弃的事件流）。
     fn recv_collect(
@@ -954,15 +1009,97 @@ mod poller_tests {
         // poller 已停，存活探针子进程即可收殓（sleep 自限时是兜底）。
         let _ = proc_a.kill();
         let _ = proc_b.kill();
+
+        // ⑥ v1.2 Task 4：sessions-snapshot 每 tick 携行（独立事件流，payload
+        // 形状由专门单测钉），golden 全等只针对 status/turn-complete 流——
+        // 过滤后再比。快照自身的过滤语义另行断言：snapshot 必须恰好携带
+        // sid-a/sid-b，self/stale 永不得洩入（快照级回归钉，与上面的尾读级
+        // tc 静默互补——若 self_pids/staleness 过滤被删，这里与 tc 双双显红）。
+        assert!(
+            seen.iter().any(|(e, _)| e == "sessions-snapshot"),
+            "every tick must carry a sessions-snapshot, got {:?}",
+            seen.iter().map(|(e, _)| e).collect::<Vec<_>>()
+        );
+        for v in seen
+            .iter()
+            .filter(|(e, _)| e == "sessions-snapshot")
+            .map(|(_, v)| v)
+        {
+            assert_eq!(
+                snapshot_session_ids(v),
+                vec!["sid-a".to_string(), "sid-b".to_string()],
+                "snapshot must carry exactly the two live sessions (self/stale excluded), got {v}"
+            );
+        }
+        let streamed: Vec<Ev> = seen
+            .iter()
+            .filter(|(e, _)| e != "sessions-snapshot")
+            .cloned()
+            .collect();
         let golden = vec![
             ("session-status".to_string(), json!({"working": true})),
             ("turn-complete".to_string(), ta),
             ("turn-complete".to_string(), tb),
         ];
         assert_eq!(
-            seen, golden,
+            streamed, golden,
             "event sequence must match the golden multi-session scene"
         );
+    }
+
+    /// v1.2 Task 4：sessions-snapshot payload 单测（复用 golden fixture 布局）。
+    /// 两 session（A busy / B idle，pid=测试进程自身，spawn_poller 的
+    /// self_pids 为空集 → 均入选）：每 tick 的 snapshot 必须整体携带 alive
+    /// 全部五字段（sessionId/cwd/name/status/updatedAtMs）。顺序说明：alive
+    /// 顺序即 read_dir 顺序不保证（前端按 status+project 排序显示），测试把
+    /// sessions 数组按 sessionId 排序后做全等；drain 窗口内的每一条
+    /// snapshot 都断言——缺字段/多会话/漏会话即红。
+    #[test]
+    fn test_sessions_snapshot_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let pid = std::process::id();
+        let cwd_a = make_session(tmp.path(), pid, "sid-a", "alpha", "busy", now, "A 历史回合");
+        let cwd_b = make_session(tmp.path(), pid, "sid-b", "beta", "idle", now, "B 历史回合");
+        let (rx, stop) = spawn_poller(tmp.path());
+
+        let expected = json!({
+            "sessions": [
+                {
+                    "sessionId": "sid-a",
+                    "cwd": cwd_a,
+                    "name": "alpha",
+                    "status": "busy",
+                    "updatedAtMs": now,
+                },
+                {
+                    "sessionId": "sid-b",
+                    "cwd": cwd_b,
+                    "name": "beta",
+                    "status": "idle",
+                    "updatedAtMs": now,
+                },
+            ]
+        });
+
+        let hit = wait_for(
+            &rx,
+            |(e, v)| e == "sessions-snapshot" && snapshot_matches(v, &expected),
+            Duration::from_secs(2),
+        );
+        let events = stop_and_drain(&stop, &rx);
+        assert!(
+            hit.is_some(),
+            "expected a sessions-snapshot carrying exactly the two sessions with all fields, got {:?}",
+            events
+        );
+        // 首条之后窗口内每一条 snapshot 都必须同样成立（alive 每 tick 稳定重建）。
+        for (e, v) in events.iter().filter(|(e, _)| e == "sessions-snapshot") {
+            assert!(
+                snapshot_matches(v, &expected),
+                "every snapshot must carry exactly the two sessions with all fields, got {e} {v}"
+            );
+        }
     }
 
     /// staleness 间隙后续读（acceptance round 2 修复的回归钉）：session A

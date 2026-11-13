@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the pet and chat windows",
-  "windows": ["pet", "chat"],
+  "description": "Capability for the pet, chat and sessions windows",
+  "windows": ["pet", "chat", "sessions"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
