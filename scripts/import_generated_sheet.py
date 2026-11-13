@@ -583,7 +583,10 @@ def run_compose(args, skin_id):
         for (minx, miny, maxx, maxy, _) in info["bboxes"]:
             bw, bh = maxx - minx + 1, maxy - miny + 1
             scale = min(scale, CONTENT_W / bw, CONTENT_H / bh)
-    log("      global scale factor: %.6f" % scale)
+    fit_scale = scale
+    scale *= args.scale
+    log("      global scale factor: %.6f (fit %.6f x user --scale %.2f)"
+        % (scale, fit_scale, args.scale))
 
     log("compositing %dx%d sheet ..." % (SHEET_W, SHEET_H))
     sheet = bytearray(SHEET_W * SHEET_H * 4)
@@ -676,6 +679,11 @@ def parse_args(argv=None):
                     help="declared pose count per row strip (default: "
                          "4,8,4,4); a split mismatch aborts with the "
                          "per-segment width distribution")
+    ap.add_argument("--scale", metavar="<f>", type=float, default=1.0,
+                    help="extra scale factor multiplied onto the global fit "
+                         "scale (0.0-1.0, e.g. 0.8 = 80%%); poses stay "
+                         "bottom-center aligned, applies to both the grid "
+                         "and compose-rows paths")
     return ap.parse_args(argv)
 
 
@@ -687,6 +695,10 @@ def main():
         if not skin_id or "/" in skin_id or skin_id in (".", ".."):
             raise SystemExit("invalid --skin id: %r (must be a plain "
                              "directory name)" % args.skin)
+    # --scale applies to both paths (compose dispatches with args intact)
+    if args.scale <= 0 or args.scale > 1.5:
+        raise SystemExit("invalid --scale: %r (must be > 0 and <= 1.5)"
+                         % args.scale)
     if args.compose_rows:
         run_compose(args, skin_id)
         return
@@ -727,7 +739,10 @@ def main():
     for _, (minx, miny, maxx, maxy, _) in used:
         bw, bh = maxx - minx + 1, maxy - miny + 1
         scale = min(scale, CONTENT_W / bw, CONTENT_H / bh)
-    log("      global scale factor: %.6f" % scale)
+    fit_scale = scale
+    scale *= args.scale
+    log("      global scale factor: %.6f (fit %.6f x user --scale %.2f)"
+        % (scale, fit_scale, args.scale))
 
     log("[5/6] compositing %dx%d sheet ..." % (SHEET_W, SHEET_H))
     sheet = bytearray(SHEET_W * SHEET_H * 4)
