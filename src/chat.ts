@@ -291,6 +291,25 @@ void listen<ChatEventPayload>("chat-event", (e) => {
   addDivider();
 });
 
+// ===== 链接系统浏览器打开（v1.2）=====
+//
+// Tauri 默认拦截跨源导航（点气泡里的链接无反应），所以这里事件委托拦下
+// 消息区的 <a> 点击，转经后端 open_external 用系统默认浏览器打开（后端
+// 只放行 http/https）。无 href 的 <a>（DOMPurify 剥过的裸锚点）不拦；
+// 气泡内其它点击行为不受影响。toast/logLine 为函数声明、提升可用。
+messagesEl.addEventListener("click", (e: MouseEvent) => {
+  const a = (e.target as HTMLElement).closest("a");
+  if (!a) return;
+  const href = a.getAttribute("href");
+  if (!href) return;
+  e.preventDefault();
+  invoke("open_external", { url: href }).catch((err: unknown) => {
+    console.error("open_external failed:", err);
+    logLine(`[chat] open_external failed: ${String(err)}`);
+    toast(`链接打开失败：${String(err)}`);
+  });
+});
+
 // ===== History (v1.1) =====
 
 // The pet window owns the log and pushes it when this window is created (plus

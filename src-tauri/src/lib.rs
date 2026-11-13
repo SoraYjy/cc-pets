@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, RunEvent};
 
 mod chat;
+mod opener;
 mod settings;
 mod skins;
 mod watcher;
@@ -127,6 +128,7 @@ pub fn run() {
             chat::chat_stop,
             chat::chat_restart,
             debug_log::append_debug,
+            opener::open_external,
             settings::get_settings,
             settings::save_settings,
             skins::get_skins
