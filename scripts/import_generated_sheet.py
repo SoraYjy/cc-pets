@@ -37,6 +37,22 @@ when available and otherwise falls back to the stdlib PNG decoder below
 Usage:
     python3 -I scripts/import_generated_sheet.py               # default skin
     python3 -I scripts/import_generated_sheet.py --skin <id>   # skin slot
+    python3 -I scripts/import_generated_sheet.py --compose-rows r1.png,r2.png,r3.png,r4.png \
+        --skin <id> --row-counts 4,8,4,4                       # row-strip compose
+
+--compose-rows: the model cannot keep tall ears inside an 8x4 grid cell
+(row boundaries cut through ear tips), so poses are generated as four row
+strips instead (white background, no grid lines, poses separated by blank
+space; declared pose counts default to 4,8,4,4).  Each strip is independently
+flood-cleared (same white->alpha treatment as the grid path), then split into
+poses at fully blank column runs (a run only counts as a separator when it is
+at least 3% of the strip's width; narrower gaps stay inside a pose).  A split
+count mismatch against --row-counts aborts with the per-segment width
+distribution.  All poses across all four strips share ONE global scale (the
+largest at which every pose fits the 184x200 content box, never upscaling)
+and are placed bottom-center into their row's cells in split order; leftover
+cells stay fully transparent.  --skin registers the composed sheet as a skin
+exactly like the grid path (pet.json skins history preserved).
 
 --skin <id> imports the same grid as a skin instead: the sheet lands in
 assets/pet/skins/<id>/spritesheet.png and the skin is registered in pet.json's
@@ -92,12 +108,12 @@ def log(msg):
     print(msg, flush=True)
 
 # ------------------------------------------------------- step 1: sips -> PNG
-def convert_to_png(src):
+def convert_to_png(src, out_path=CONVERTED_PNG):
     os.makedirs(WORK_DIR, exist_ok=True)
     r = subprocess.run(
-        ["sips", "-s", "format", "png", src, "--out", CONVERTED_PNG],
+        ["sips", "-s", "format", "png", src, "--out", out_path],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if r.returncode != 0 or not os.path.exists(CONVERTED_PNG):
+    if r.returncode != 0 or not os.path.exists(out_path):
         raise RuntimeError("sips conversion failed: "
                            + r.stderr.decode("utf-8", "replace").strip())
 
@@ -453,6 +469,189 @@ def build_pet_json(png_bytes, old_png, skin_id=None):
     # animations / cellWidth / cellHeight / columns / spritesheetPath: untouched
     return data, changed
 
+# ------------------------------------------------ compose-rows mode (v1.2)
+def column_profile(rgba, W, H):
+    """Opaque-pixel count per column (after the strip's flood/speck pass)."""
+    cols = [0] * W
+    for y in range(H):
+        base = y * W
+        for x in range(W):
+            if rgba[(base + x) * 4 + 3]:
+                cols[x] += 1
+    return cols
+
+def split_segments(cols, W, min_gap):
+    """Split a strip's columns into content segments (inclusive-exclusive).
+    A blank run only separates poses once it reaches `min_gap` columns;
+    narrower runs stay inside a pose.  Leading/trailing blanks are ignored,
+    and a segment still open at the strip's end closes there — a trailing
+    blank run can never reach the threshold past the last column, so without
+    this the LAST pose would be silently dropped whenever its trailing
+    whitespace is narrower than min_gap."""
+    segs = []
+    in_content = False
+    x0 = 0
+    gap_start = None
+    for x in range(W + 1):
+        blank = x == W or cols[x] == 0
+        if not blank:
+            if not in_content:
+                in_content = True
+                x0 = x
+            gap_start = None
+            continue
+        if not in_content:
+            continue
+        if gap_start is None:
+            gap_start = x
+        if x - gap_start >= min_gap:
+            segs.append((x0, gap_start))
+            in_content = False
+            gap_start = None
+    if in_content:
+        segs.append((x0, gap_start if gap_start is not None else W))
+    return segs
+
+def process_strip(path, tag):
+    """Decode one row strip, run the full white->alpha treatment on the whole
+    image (no grid lines exist), and split it into pose segments."""
+    out_png = os.path.join(WORK_DIR, "compose-%s.png" % tag)
+    convert_to_png(path, out_png)
+    rgba, W, H = decode_rgba(out_png)
+    log("      decoded %dx%d RGBA" % (W, H))
+    box = (0, 0, W, H)
+    bg = bg_ref(rgba, W, box)
+    flood_clear(rgba, W, box, bg, T_FLOOD)
+    speck_pass(rgba, W, box, bg, T_SPECK, SPECK_NEIGH)
+    min_gap = max(1, int(round(W * 0.03)))
+    segs = split_segments(column_profile(rgba, W, H), W, min_gap)
+    return {
+        "path": path,
+        "rgba": rgba,
+        "W": W,
+        "H": H,
+        "min_gap": min_gap,
+        "segs": segs,
+        "bboxes": [cell_bbox(rgba, W, (x0, 0, x1, H)) for (x0, x1) in segs],
+    }
+
+def run_compose(args, skin_id):
+    paths = [p.strip() for p in args.compose_rows.split(",") if p.strip()]
+    if len(paths) != ROWS:
+        raise SystemExit("--compose-rows needs exactly %d comma-separated "
+                         "row-strip paths, got %d" % (ROWS, len(paths)))
+    try:
+        counts = [int(v) for v in args.row_counts.split(",")]
+    except ValueError:
+        raise SystemExit("invalid --row-counts: %r (expected four integers)"
+                         % args.row_counts)
+    if len(counts) != ROWS:
+        raise SystemExit("--row-counts needs exactly %d comma-separated "
+                         "values, got %d" % (ROWS, len(counts)))
+    for i, n in enumerate(counts):
+        if not 1 <= n <= COLS:
+            raise SystemExit("--row-counts value %d for row %d out of range "
+                             "(1..%d)" % (n, i + 1, COLS))
+    for p in paths:
+        if not os.path.exists(p):
+            raise SystemExit("row strip not found: %s" % p)
+
+    log("== Lynn compose-rows import =="
+        + ("  (skin: %s)" % skin_id if skin_id else ""))
+
+    rows = []
+    for i, p in enumerate(paths):
+        log("[strip %d/%d] %s" % (i + 1, ROWS, p))
+        info = process_strip(p, "r%d" % (i + 1))
+        log("      min blank-gap %dpx -> %d segments (declared %d)"
+            % (info["min_gap"], len(info["segs"]), counts[i]))
+        if len(info["segs"]) != counts[i]:
+            widths = "; ".join("cols %d-%d (%dpx wide)"
+                               % (x0, x1 - 1, x1 - x0)
+                               for (x0, x1) in info["segs"]) or "none"
+            raise SystemExit(
+                "row %d split mismatch: declared %d poses, blank-column split "
+                "found %d (separator threshold %dpx). Segments: %s. Widen the "
+                "blank gaps between poses or fix --row-counts."
+                % (i + 1, counts[i], len(info["segs"]), info["min_gap"],
+                   widths))
+        rows.append(info)
+
+    log("global scale to fit %dx%d ..." % (CONTENT_W, CONTENT_H))
+    scale = 1.0
+    for info in rows:
+        for (minx, miny, maxx, maxy, _) in info["bboxes"]:
+            bw, bh = maxx - minx + 1, maxy - miny + 1
+            scale = min(scale, CONTENT_W / bw, CONTENT_H / bh)
+    log("      global scale factor: %.6f" % scale)
+
+    log("compositing %dx%d sheet ..." % (SHEET_W, SHEET_H))
+    sheet = bytearray(SHEET_W * SHEET_H * 4)
+    placed = []
+    for r, info in enumerate(rows):
+        for c, (minx, miny, maxx, maxy, _) in enumerate(info["bboxes"]):
+            bw, bh = maxx - minx + 1, maxy - miny + 1
+            dw = max(1, int(round(bw * scale)))
+            dh = max(1, int(round(bh * scale)))
+            ox = c * CELL_W + (CENTER_X - dw // 2)
+            oy = r * CELL_H + (BASELINE_Y - dh)
+            frame = resize_region(info["rgba"], info["W"],
+                                  minx, miny, bw, bh, dw, dh)
+            for y in range(dh):
+                sbase = y * dw * 4
+                dbase = ((oy + y) * SHEET_W + ox) * 4
+                sheet[dbase:dbase + dw * 4] = frame[sbase:sbase + dw * 4]
+            placed.append((r, c, bw, bh, dw, dh,
+                           ox - c * CELL_W, oy - r * CELL_H))
+    for r, info in enumerate(rows):
+        if len(info["bboxes"]) < COLS:
+            log("  r%d cells c%d..c%d EMPTY (left fully transparent)"
+                % (r, len(info["bboxes"]), COLS - 1))
+
+    log("writing outputs ...")
+    write_png = load_png_writer()
+    target_sheet = (os.path.join(SKINS_DIR, skin_id, "spritesheet.png")
+                    if skin_id else SHEET_PATH)
+    os.makedirs(os.path.dirname(target_sheet), exist_ok=True)
+    old_png = None
+    if skin_id is None and os.path.exists(SHEET_PATH):
+        with open(SHEET_PATH, "rb") as f:
+            old_png = f.read()
+    write_png(target_sheet, SHEET_W, SHEET_H, sheet)
+    with open(target_sheet, "rb") as f:
+        png_bytes = f.read()
+    pet, changed = build_pet_json(png_bytes, old_png, skin_id)
+    with open(PET_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(pet, f, indent=2)
+        f.write("\n")
+
+    log("")
+    log("per-cell report (cell: source bbox w*h, scaled w*h at in-cell "
+        "offset, opaque px):")
+    for (r, c, bw, bh, dw, dh, lx, ly) in placed:
+        cnt = 0
+        for y in range(r * CELL_H, (r + 1) * CELL_H):
+            base = y * SHEET_W
+            for x in range(c * CELL_W, (c + 1) * CELL_W):
+                if sheet[(base + x) * 4 + 3]:
+                    cnt += 1
+        log("  r%dc%-2d used   src %3dx%-3d -> %3dx%-3d at (%3d,%3d)  "
+            "opaque %5d" % (r, c, bw, bh, dw, dh, lx, ly, cnt))
+    log("")
+    log("pet.json spritesheetPath=%s cell=%dx%d columns=%d id=%s version=%d%s"
+        % (pet["spritesheetPath"], pet["cellWidth"], pet["cellHeight"],
+           pet["columns"], pet["id"], pet["spriteVersionNumber"],
+           " (bumped)" if changed else " (unchanged)"))
+    if skin_id is not None:
+        log("skin %r registered: spritesheetPath=%s displayName=%s (skins: %s)"
+            % (skin_id, pet["skins"][skin_id]["spritesheetPath"],
+               pet["skins"][skin_id]["displayName"],
+               ", ".join(sorted(pet["skins"]))))
+    log("sheet md5: %s" % hashlib.md5(png_bytes).hexdigest())
+    with open(PET_JSON_PATH, "rb") as f:
+        log("pet.json md5: %s" % hashlib.md5(f.read()).hexdigest())
+    log("done.")
+
 # --------------------------------------------------------------------- main
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
@@ -464,6 +663,19 @@ def parse_args(argv=None):
                          "spritesheet.png, unchanged legacy behavior)")
     ap.add_argument("--src", metavar="<path>", default=SRC_JPEG,
                     help="source grid image (default: %s)" % SRC_JPEG)
+    ap.add_argument("--compose-rows",
+                    metavar="<r1>,<r2>,<r3>,<r4>", default=None,
+                    help="compose mode: four row-strip images (white "
+                         "background, no grid, poses separated by blank "
+                         "space); each is flood-cleared and split on blank "
+                         "columns, then all poses share one global scale and "
+                         "are laid out bottom-center into the 8x4 grid in "
+                         "split order (leftover cells stay transparent)")
+    ap.add_argument("--row-counts", metavar="<n1>,<n2>,<n3>,<n4>",
+                    default="4,8,4,4",
+                    help="declared pose count per row strip (default: "
+                         "4,8,4,4); a split mismatch aborts with the "
+                         "per-segment width distribution")
     return ap.parse_args(argv)
 
 
@@ -475,6 +687,9 @@ def main():
         if not skin_id or "/" in skin_id or skin_id in (".", ".."):
             raise SystemExit("invalid --skin id: %r (must be a plain "
                              "directory name)" % args.skin)
+    if args.compose_rows:
+        run_compose(args, skin_id)
+        return
     src = args.src
     if not os.path.exists(src):
         raise SystemExit("source image not found: %s" % src)
