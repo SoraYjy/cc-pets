@@ -42,6 +42,18 @@ const CHAT_GAP_PX = 8; // clearance between pet and bubble
 const CHAT_REOPEN_GRACE_MS = 350;
 let chatClosedAt = 0;
 
+// v1.2 Task 3（通知点击聚焦，启发式）：桌面端插件拿不到通知的原生点击事件——
+// 点通知的实际效果是 macOS 激活本应用，pet 窗随之获得焦点。于是「发通知后
+// 短时间内 pet 窗 focus=true」就是「用户点了通知」的替身：60s 窗口内 pet 窗
+// 聚焦且气泡自该通知起从未显示过 → reveal（复用既有 show 链路）。固有语义：
+// 60s 内 Cmd-Tab 切走再切回同样触发（README 已知限制）；未来插件支持原生
+// 点击事件时可整体替换。
+const NOTIFICATION_FOCUS_WINDOW_MS = 60_000;
+let lastNotificationAt = 0;
+// 「已显示」闩（边界②）：气泡任一显示路径盖闩、发通知成功时复位——用户已
+// 为这条通知开过（又关掉）气泡后，后续激活不得再自动弹。
+let bubbleShownSinceNotification = true;
+
 // ===== Debug line =====
 
 // Diagnostic facility (acceptance fix): failure paths that used to be
@@ -397,7 +409,20 @@ function setupListeners(): void {
             ? truncateForNotification(e.payload.summary)
             : "查看 Claude Code 终端",
         });
-        debug("notification sent");
+        // v1.2 Task 3: 发送成功 → 盖时刻戳（启发式聚焦的时间锚）并复位
+        // 「已显示」闩；此刻气泡若正开着，摘要已随 turn-summary 上屏——
+        // 视为已显示过，后续激活不再自动弹。
+        lastNotificationAt = Date.now();
+        bubbleShownSinceNotification = false;
+        debug(`notification sent at ${lastNotificationAt}`);
+        try {
+          const open = await WebviewWindow.getByLabel(CHAT_LABEL);
+          if (open && (await open.isVisible().catch(() => false))) {
+            bubbleShownSinceNotification = true;
+          }
+        } catch {
+          // 气泡窗从未创建过 → 无需补闩
+        }
       } else {
         debug("notification skipped: permission not granted");
       }
@@ -410,6 +435,17 @@ function setupListeners(): void {
     debug(`skin-changed: ${e.payload.skinId}`, 5000);
     mountPet(e.payload.skinId).catch((err: unknown) =>
       showDebug(`skin switch failed: ${errorText(err)}`),
+    );
+  });
+
+  // v1.2 Task 3: pet 窗聚焦 = 应用被激活（点通知 / Cmd-Tab 切回 / Dock 点击
+  // 都走这里）——启发式把「60s 内有未消费的通知」当成弹气泡的许可。
+  void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+    if (!focused) return;
+    if (Date.now() - lastNotificationAt >= NOTIFICATION_FOCUS_WINDOW_MS) return;
+    if (bubbleShownSinceNotification) return;
+    revealChatForNotification().catch((err: unknown) =>
+      showDebug(`notification-focus failed: ${errorText(err)}`),
     );
   });
 }
@@ -548,6 +584,7 @@ function onChatWindowCreated(): void {
   if (!chatCreateInFlight) return;
   chatCreateInFlight = false;
   setDebugLine("chat window created", 5000);
+  markBubbleShown(); // v1.2 Task 3: 气泡已上屏
   emitChatHistory(); // v1.1: only the creation path pushes (setFocus path skips)
   // Pet stays above the bubble (acceptance round 2): two alwaysOnTop windows
   // stack by creation order, so re-assert the pet's level whenever the chat
@@ -588,6 +625,7 @@ async function openChatWindow(): Promise<void> {
     // Serialized-chain re-entry (click raced a create): the bubble exists —
     // reveal + focus it instead of creating a duplicate label.
     debug("chat exists → show/focus", 5000);
+    markBubbleShown(); // v1.2 Task 3: 气泡已上屏
     await existing
       .unminimize()
       .catch((err: unknown) => showDebug(`chat unminimize failed: ${errorText(err)}`));
@@ -744,6 +782,7 @@ async function onClickPet(): Promise<void> {
       return;
     }
     debug("chat hidden → show", 5000);
+    markBubbleShown(); // v1.2 Task 3: 气泡已上屏
     await existing
       .unminimize()
       .catch((err: unknown) => showDebug(`chat unminimize failed: ${errorText(err)}`));
@@ -768,6 +807,44 @@ async function onClickPet(): Promise<void> {
   invoke<string>("spawn_chat")
     .then((pid) => debug(`spawn_chat ok: ${pid}`, 5000))
     .catch((err: unknown) => showDebug(`spawn_chat failed: ${errorText(err)}`));
+}
+
+// v1.2 Task 3：通知聚焦的 reveal——只作用于「已存在且隐藏」的气泡窗，show
+// 链路（unminimize → show → setFocus → reassertPetOnTop）与点猫的 show 路径
+// 完全一致。窗不存在时不动（不替用户凭空创建会话窗 / spawn 进程），留 debug
+// 轨迹；可见性探测失败按可见处理（fail-quiet，宁可不弹不乱弹）。
+async function revealChatForNotification(): Promise<void> {
+  let existing: WebviewWindow | null = null;
+  try {
+    existing = await WebviewWindow.getByLabel(CHAT_LABEL);
+  } catch (err) {
+    showDebug(`notification-focus getByLabel failed: ${errorText(err)}`);
+    return;
+  }
+  if (!existing) {
+    debug("notification-focus: no chat window → skip");
+    return;
+  }
+  const visible = await existing.isVisible().catch(() => true);
+  if (visible) return; // 边界①：气泡已显示 → no-op
+  debug("notification-focus reveal", 5000);
+  markBubbleShown();
+  await existing
+    .unminimize()
+    .catch((err: unknown) => showDebug(`chat unminimize failed: ${errorText(err)}`));
+  await existing
+    .show()
+    .catch((err: unknown) => showDebug(`chat show failed: ${errorText(err)}`));
+  await existing
+    .setFocus()
+    .catch((err: unknown) => showDebug(`chat setFocus failed: ${errorText(err)}`));
+  reassertPetOnTop();
+}
+
+// v1.2 Task 3：气泡任一显示路径（创建 / 点猫 show / 通知 reveal）都要盖闩，
+// 通知后 60s 内的再次激活才不会重复弹。
+function markBubbleShown(): void {
+  bubbleShownSinceNotification = true;
 }
 
 // 全局错误钩子（round 5）：未捕获异常/拒绝以前只进控制台、静默丢失——
