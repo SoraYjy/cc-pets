@@ -35,8 +35,17 @@ when available and otherwise falls back to the stdlib PNG decoder below
 (zlib + all five filters unfiltering, 8-bit RGB/RGBA and friends).
 
 Usage:
-    python3 -I scripts/import_generated_sheet.py
+    python3 -I scripts/import_generated_sheet.py               # default skin
+    python3 -I scripts/import_generated_sheet.py --skin <id>   # skin slot
+
+--skin <id> imports the same grid as a skin instead: the sheet lands in
+assets/pet/skins/<id>/spritesheet.png and the skin is registered in pet.json's
+"skins" map (displayName defaults to <id>, hand-edit to rename).  The root
+spritesheet.png and spriteVersionNumber stay untouched.  All skins share one
+grid spec (animations argument is unchanged), so pet.json's animations serve
+every skin.
 """
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -61,6 +70,7 @@ RENDER_SCRIPT = os.path.join(ROOT, "scripts", "render_placeholder_pet.py")
 PET_DIR = os.path.join(ROOT, "assets", "pet")
 SHEET_PATH = os.path.join(PET_DIR, "spritesheet.png")
 PET_JSON_PATH = os.path.join(PET_DIR, "pet.json")
+SKINS_DIR = os.path.join(PET_DIR, "skins")   # per-skin sheets: skins/<id>/…
 
 # --------------------------------------------------------------- constants
 COLS, ROWS = 8, 4
@@ -82,10 +92,10 @@ def log(msg):
     print(msg, flush=True)
 
 # ------------------------------------------------------- step 1: sips -> PNG
-def convert_to_png():
+def convert_to_png(src):
     os.makedirs(WORK_DIR, exist_ok=True)
     r = subprocess.run(
-        ["sips", "-s", "format", "png", SRC_JPEG, "--out", CONVERTED_PNG],
+        ["sips", "-s", "format", "png", src, "--out", CONVERTED_PNG],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if r.returncode != 0 or not os.path.exists(CONVERTED_PNG):
         raise RuntimeError("sips conversion failed: "
@@ -406,33 +416,75 @@ def load_png_writer():
     return mod.write_png
 
 # ------------------------------------------------------------------ pet.json
-def build_pet_json(png_bytes, old_png):
+def build_pet_json(png_bytes, old_png, skin_id=None):
     """Update id/description (and bump spriteVersionNumber when the PNG
-    content actually changed) while leaving animations and geometry as-is."""
+    content actually changed) while leaving animations and geometry as-is.
+
+    With skin_id set, the run targets a skin slot instead: the skin is
+    registered into pet.json's "skins" map (existing entries are preserved —
+    this script stays pet.json's single writer and rewrites the whole file,
+    skins history included).  displayName starts as the id; hand-edit to
+    rename.  The root sheet was not touched, so spriteVersionNumber does not
+    move (it tracks the default skin's content only)."""
     if not os.path.exists(PET_JSON_PATH):
         raise SystemExit("missing %s -- animations must be preserved from it"
                          % PET_JSON_PATH)
     with open(PET_JSON_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
-    changed = old_png != png_bytes
     data["id"] = "lynn"
     data["displayName"] = "Lynn"
     data["description"] = ("Lynn official spritesheet, imported from the "
                            "generated cat grid image by "
                            "scripts/import_generated_sheet.py")
-    if changed:
-        data["spriteVersionNumber"] = int(data.get("spriteVersionNumber", 1)) + 1
+    if skin_id is not None:
+        skins = data.get("skins")
+        if not isinstance(skins, dict):
+            skins = {}
+        skins[skin_id] = {
+            "spritesheetPath": "skins/%s/spritesheet.png" % skin_id,
+            "displayName": skin_id,
+        }
+        data["skins"] = skins
+        changed = False  # default sheet untouched → no version bump
+    else:
+        changed = old_png != png_bytes
+        if changed:
+            data["spriteVersionNumber"] = int(data.get("spriteVersionNumber", 1)) + 1
     # animations / cellWidth / cellHeight / columns / spritesheetPath: untouched
     return data, changed
 
 # --------------------------------------------------------------------- main
-def main():
-    if not os.path.exists(SRC_JPEG):
-        raise SystemExit("source image not found: %s" % SRC_JPEG)
-    log("== Lynn generated-sheet import ==")
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Import a generated 8x4 grid image as a Lynn spritesheet.")
+    ap.add_argument("--skin", metavar="<id>", default=None,
+                    help="import as skin <id>: write assets/pet/skins/<id>/"
+                         "spritesheet.png and register it in pet.json's "
+                         "skins map (without it: overwrite the default root "
+                         "spritesheet.png, unchanged legacy behavior)")
+    ap.add_argument("--src", metavar="<path>", default=SRC_JPEG,
+                    help="source grid image (default: %s)" % SRC_JPEG)
+    return ap.parse_args(argv)
 
-    log("[1/6] sips: %s -> %s" % (SRC_JPEG, CONVERTED_PNG))
-    convert_to_png()
+
+def main():
+    args = parse_args()
+    skin_id = None
+    if args.skin is not None:
+        skin_id = args.skin.strip()
+        if not skin_id or "/" in skin_id or skin_id in (".", ".."):
+            raise SystemExit("invalid --skin id: %r (must be a plain "
+                             "directory name)" % args.skin)
+    src = args.src
+    if not os.path.exists(src):
+        raise SystemExit("source image not found: %s" % src)
+    target_sheet = (os.path.join(SKINS_DIR, skin_id, "spritesheet.png")
+                    if skin_id else SHEET_PATH)
+    log("== Lynn generated-sheet import =="
+        + ("  (skin: %s)" % skin_id if skin_id else ""))
+
+    log("[1/6] sips: %s -> %s" % (src, CONVERTED_PNG))
+    convert_to_png(src)
     rgba, W, H = decode_rgba(CONVERTED_PNG)
     log("      decoded %dx%d RGBA" % (W, H))
 
@@ -482,15 +534,17 @@ def main():
 
     log("[6/6] writing outputs ...")
     write_png = load_png_writer()
-    os.makedirs(PET_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(target_sheet), exist_ok=True)
     old_png = None
-    if os.path.exists(SHEET_PATH):
+    # Skin mode never bumps spriteVersionNumber (it tracks the default root
+    # sheet), so the old/new comparison only makes sense in default mode.
+    if skin_id is None and os.path.exists(SHEET_PATH):
         with open(SHEET_PATH, "rb") as f:
             old_png = f.read()
-    write_png(SHEET_PATH, SHEET_W, SHEET_H, sheet)
-    with open(SHEET_PATH, "rb") as f:
+    write_png(target_sheet, SHEET_W, SHEET_H, sheet)
+    with open(target_sheet, "rb") as f:
         png_bytes = f.read()
-    pet, changed = build_pet_json(png_bytes, old_png)
+    pet, changed = build_pet_json(png_bytes, old_png, skin_id)
     with open(PET_JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(pet, f, indent=2)
         f.write("\n")
@@ -517,8 +571,17 @@ def main():
         % (pet["spritesheetPath"], pet["cellWidth"], pet["cellHeight"],
            pet["columns"], pet["id"], pet["spriteVersionNumber"],
            " (bumped)" if changed else " (unchanged)"))
-    log("spritesheet.png md5: %s"
-        % hashlib.md5(png_bytes).hexdigest())
+    if skin_id is not None:
+        log("skin %r registered: spritesheetPath=%s displayName=%s (skins: %s)"
+            % (skin_id, pet["skins"][skin_id]["spritesheetPath"],
+               pet["skins"][skin_id]["displayName"],
+               ", ".join(sorted(pet["skins"]))))
+        log("skin sheet: %s md5: %s"
+            % (os.path.relpath(target_sheet, ROOT),
+               hashlib.md5(png_bytes).hexdigest()))
+    else:
+        log("spritesheet.png md5: %s"
+            % hashlib.md5(png_bytes).hexdigest())
     with open(PET_JSON_PATH, "rb") as f:
         log("pet.json         md5: %s"
             % hashlib.md5(f.read()).hexdigest())

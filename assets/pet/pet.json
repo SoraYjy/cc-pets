@@ -2,8 +2,14 @@
   "id": "lynn",
   "displayName": "Lynn",
   "description": "Lynn official spritesheet, imported from the generated cat grid image by scripts/import_generated_sheet.py",
-  "spriteVersionNumber": 2,
+  "spriteVersionNumber": 3,
   "spritesheetPath": "spritesheet.png",
+  "skins": {
+    "default": {
+      "spritesheetPath": "spritesheet.png",
+      "displayName": "像素猫"
+    }
+  },
   "cellWidth": 192,
   "cellHeight": 208,
   "columns": 8,
