@@ -1,8 +1,9 @@
 // Sessions panel (v1.2 Task 4): pure display of the watcher's
 // sessions-snapshot stream — one row per live Claude Code session (status
-// dot + project + session name + relative activity time). No input, no
-// light-dismiss: the panel closes via ×/Esc (hide lifecycle, same as the
-// chat bubble) and is toggled by right-clicking the pet (main.ts).
+// dot + project + session name + relative activity time). No input. Closes
+// via ×/Esc and light-dismiss (失焦即收, acceptance-fix-14 — same hide
+// lifecycle and arming scheme as the chat bubble) and is toggled by
+// right-clicking the pet (main.ts).
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -96,8 +97,6 @@ void listen<SessionsSnapshotPayload>("sessions-snapshot", (e) => {
 window.setInterval(render, 1000); // relative-time aging between ticks
 
 // ===== Close entries (chat 同款)：× / Esc → hide，窗口不销毁 =====
-// 无 light-dismiss（刻意）：面板是瞥一眼的状态面，失焦不关；焦点在面板上时
-// Esc 才收得到（show 链路带 setFocus，右键呼出后 Esc 即可用）。
 function logLine(text: string): void {
   void invoke("append_debug", { line: text }).catch(() => {});
 }
@@ -114,6 +113,31 @@ function hidePanel(): void {
 closeBtn.addEventListener("click", hidePanel);
 document.addEventListener("keydown", (e: KeyboardEvent) => {
   if (e.key === "Escape") hidePanel();
+});
+
+// ===== Light-dismiss（acceptance-fix-14）：点面板外任意区域即收起 =====
+//
+// 与聊天窗同一套成熟实现（chat 轮 b0e10f8）：守卫必须在加载时用 isFocused
+// 主动武装——创建期 focused=true 事件先于监听注册、注定错过，只等后续
+// focus 事件武装会永远等不到（点猫/点聊天窗/点桌面夺焦即收起；Esc/× 路径
+// 不变；面板 hide 后再右键猫照常 show）。失焦分支留 append_debug 一行，
+// 「没收到/没收起」的判读可直接读 debug.log。
+let armed = false;
+void getCurrentWindow()
+  .isFocused()
+  .then((focused) => {
+    if (focused) armed = true;
+  })
+  .catch(() => {}); // 探测失败 → 仅依赖事件路
+void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+  if (focused) {
+    armed = true;
+    return;
+  }
+  logLine(`[sessions] blur fired, armed=${armed}${armed ? " → hide" : " → ignored"}`);
+  if (armed) {
+    hidePanel();
+  }
 });
 
 // Diagnostics: exceptions that used to be console-only land in debug.log
