@@ -7,7 +7,13 @@ import {
 } from "./format";
 import { decideDoneFallback, type ChatEntry } from "./history";
 import { renderMarkdown } from "./markdown";
-import { clampOpacity, normalizePetSkin, normalizeStyle, type ThemeStyle } from "./theme";
+import {
+  clampOpacity,
+  clampPetZoom,
+  normalizePetSkin,
+  normalizeStyle,
+  type ThemeStyle,
+} from "./theme";
 
 // Backend chat.rs emits { kind: "init" | "text" | "done", text }.
 interface ChatEventPayload {
@@ -424,13 +430,6 @@ let currentStyle: ThemeStyle = "c";
 let currentOpacity = 0.92;
 let currentSkin = "default";
 let currentPetZoom = 1.0;
-
-// Mirrors the Rust clamp (settings.rs clamp_pet_zoom): NaN/negative → 1.0,
-// else clamp into [0.5, 1.5].
-function clampPetZoom(z: number): number {
-  if (Number.isNaN(z) || z < 0) return 1.0;
-  return Math.min(1.5, Math.max(0.5, z));
-}
 
 // apply = swap the body theme class + write the CSS alpha variable + sync the
 // zoom slider UI. The window background and every theme rule read the class /

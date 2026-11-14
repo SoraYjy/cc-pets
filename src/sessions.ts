@@ -94,7 +94,12 @@ void listen<SessionsSnapshotPayload>("sessions-snapshot", (e) => {
   latest = e.payload;
   render();
 });
-window.setInterval(render, 1000); // relative-time aging between ticks
+// Relative-time aging between ticks; skipped while hidden (same CPU
+// discipline as the sprite loop's document.hidden gate).
+window.setInterval(() => {
+  if (document.hidden) return;
+  render();
+}, 1000);
 
 // ===== Close entries (chat 同款)：× / Esc → hide，窗口不销毁 =====
 function logLine(text: string): void {

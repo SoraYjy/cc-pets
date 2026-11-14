@@ -754,20 +754,24 @@ body.theme-c #settings-panel {
   gap: 6px;
 }
 
-#alpha {
+#alpha,
+#pet-zoom {
   flex: 1;
   margin: 0;
 }
 
-body.theme-a #alpha {
+body.theme-a #alpha,
+body.theme-a #pet-zoom {
   accent-color: #7c9cd0;
 }
 
-body.theme-b #alpha {
+body.theme-b #alpha,
+body.theme-b #pet-zoom {
   accent-color: #4a7dc9;
 }
 
-body.theme-c #alpha {
+body.theme-c #alpha,
+body.theme-c #pet-zoom {
   accent-color: #3a4a6b;
 }
 

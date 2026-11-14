@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { currentMonitor, cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { clampPetZoom } from "./theme";
 import {
   isPermissionGranted,
   requestPermission,
@@ -286,13 +287,6 @@ function alphaAt(wx: number, wy: number): number {
   const px = Math.min(SHEET_W - 1, Math.floor((curFrame.col + fx) * CELL_W));
   const py = Math.min(SHEET_H - 1, Math.floor((curFrame.row + fy) * CELL_H));
   return sheetAlpha[(py * SHEET_W + px) * 4 + 3];
-}
-
-// Mirrors the Rust clamp (settings.rs clamp_pet_zoom): NaN/negative → 1.0,
-// else clamp into [0.5, 1.5].
-function clampPetZoom(z: number): number {
-  if (Number.isNaN(z) || z < 0) return 1.0;
-  return Math.min(1.5, Math.max(0.5, z));
 }
 
 // ⚙ 大小滑杆 / 启动设置（acceptance-fix-12）：transform: scale() 以

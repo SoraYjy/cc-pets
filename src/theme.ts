@@ -25,6 +25,21 @@ export function clampOpacity(n: number): number {
   return Math.min(OPACITY_MAX, Math.max(OPACITY_MIN, n));
 }
 
+// Mirrors the Rust clamp (settings.rs clamp_pet_zoom): NaN/negative → 1.0,
+// else clamp into [0.5, 1.5] — shared by the pet window (hit-test mapping +
+// transform) and the chat window (slider UI); was duplicated verbatim in
+// both until the final review dedupe.
+const PET_ZOOM_MIN = 0.5;
+const PET_ZOOM_MAX = 1.5;
+const PET_ZOOM_DEFAULT = 1.0;
+
+export function clampPetZoom(z: number): number {
+  if (Number.isNaN(z) || z < 0) {
+    return PET_ZOOM_DEFAULT;
+  }
+  return Math.min(PET_ZOOM_MAX, Math.max(PET_ZOOM_MIN, z));
+}
+
 // petSkin (v1.2 多皮肤): 空/空白 → "default"，镜像 src-tauri/src/settings.rs
 // 的归一化规则。这里不做可用性校验——皮肤集合归 pet.json 的 skins 映射管，
 // 由 chat.ts 的 get_skins 消费侧判断（设置面板渲染实际存在的芯片）。
