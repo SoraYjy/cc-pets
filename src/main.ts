@@ -729,8 +729,16 @@ async function positionNearPet(
       w: petSize.width / sf,
       h: petSize.height / sf,
     };
+    // Sprite-aware vertical anchor (final-review 必修 1): the pet window is
+    // oversized (288×312) and the sprite layer scales bottom-center, so the
+    // visible head top is NOT the window top:
+    //   head = petTop + ELEM_Y + CELL_H × (1 − petZoom)
+    // (zoom 1.0 → head at +104, 0.5 → +208, 1.5 → +0 = the window top).
+    // Bubbles/panels sit 8px above that head line; at zoom 1.5 this
+    // reproduces the legacy window-top anchoring exactly.
+    const headTop = petL.y + ELEM_Y + CELL_H * (1 - clampPetZoom(petZoom));
     x = Math.round(petL.x + (petL.w - width) / 2);
-    y = Math.round(petL.y - CHAT_GAP_PX - height);
+    y = Math.round(headTop - CHAT_GAP_PX - height);
     if (mon) {
       const monL = {
         x: mon.position.x / sf,
@@ -739,9 +747,10 @@ async function positionNearPet(
         h: mon.size.height / sf,
       };
       if (y < monL.y) {
-        // no headroom above → try to the right of the pet
+        // no headroom above → try to the right of the pet; the bubble top
+        // stays on the head line (side fallback keeps the same anchor)
         x = Math.round(petL.x + petL.w + CHAT_GAP_PX);
-        y = Math.round(petL.y);
+        y = Math.round(headTop);
         if (x + width > monL.x + monL.w) {
           // right overflows → try to the left of the pet
           x = Math.round(petL.x - width - CHAT_GAP_PX);
@@ -948,6 +957,12 @@ function markBubbleShown(): void {
 // 得在同一个 "sessions" label 下启动两个 webview。不照搬 chat 的整条串行
 // 链——面板无 spawn/进程耦合，in-flight 旗标足够盖住创建竞态。
 let sessionsCreateInFlight = false;
+// 面板失焦时刻镜像（必修 2）：sessions 的 light-dismiss（fix-14）会自己
+// hide——「面板可见且持焦时右键猫」的竞态里，失焦 hidePanel 的 IPC 可能先
+// 于 toggle 的 isVisible 探测落盘（探测得 false → 走 show → 右键收起变成
+// 重新弹出）。pet 侧镜像盖 sessionsClosedAt，hidden 分支加同款 350ms 宽限
+//（共用 chat 的 CHAT_REOPEN_GRACE_MS 常量），输方不得立即 re-show。
+let sessionsClosedAt = 0;
 
 // Fresh-panel data line: the pet window re-pushes its stored snapshot to a
 // newly created panel. created 派发时新页面的 listen 尚未注册——front-loaded
@@ -981,9 +996,16 @@ async function toggleSessionsWindow(): Promise<void> {
     const visible = await existing.isVisible().catch(() => false);
     if (visible) {
       debug("sessions visible → hide (toggle)", 5000);
+      sessionsClosedAt = Date.now();
       await existing
         .hide()
         .catch((err: unknown) => showDebug(`sessions hide failed: ${errorText(err)}`));
+      return;
+    }
+    if (Date.now() - sessionsClosedAt < CHAT_REOPEN_GRACE_MS) {
+      // The blur self-hide beat this right-click to it — the toggle already
+      // happened via the light-dismiss path; do not instantly re-show.
+      debug("sessions just hid (blur race) → stay hidden", 5000);
       return;
     }
     debug("sessions hidden → show", 5000);
@@ -1037,6 +1059,12 @@ async function toggleSessionsWindow(): Promise<void> {
     sessionsCreateInFlight = false;
     showDebug(`sessions window error: ${errorText(e.payload)}`);
   });
+  // Blur mirror (必修 2): every panel blur stamps sessionsClosedAt so the
+  // toggle's grace can tell "hidden by this very right-click's blur" from
+  // "hidden earlier". Same mechanism as the chat window's chatClosedAt.
+  void sessions.onFocusChanged(({ payload: focused }) => {
+    if (!focused) sessionsClosedAt = Date.now();
+  });
 }
 
 // v1.2 Task 4: 右键呼出/收起面板。与左键互不干扰的结构性保证：左键的
@@ -1049,6 +1077,10 @@ function setupSessionsToggle(): void {
   document.addEventListener("contextmenu", (e: MouseEvent) => {
     e.preventDefault(); // 桌宠不弹系统右键菜单
     if (dragging) return; // 左键拖拽进行中：右键不做事
+    // 必修 3：右键呼面板同样是「用户在与宠交互」——通知后 60s 的聚焦启发
+    // 式不该再自动弹气泡（否则呼面板会连带弹出聊天）。先盖闩再 toggle：
+    // contextmenu 是同步 DOM 事件，几乎必然先于异步的 focus IPC 落地。
+    bubbleShownSinceNotification = true;
     toggleSessionsWindow().catch((err: unknown) =>
       showDebug(`toggleSessionsWindow failed: ${errorText(err)}`),
     );
