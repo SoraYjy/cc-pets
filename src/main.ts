@@ -50,7 +50,7 @@ const CHAT_GAP_PX = 8; // clearance between pet and bubble
 
 // v1.2 Task 4: sessions panel — right-click on the pet toggles it. The window
 // lifecycle copies the chat mode (hide/show, never destroyed; created visible;
-// closed from inside via ×/Esc, no light-dismiss).
+// closed from inside via ×/Esc or light-dismiss — acceptance-fix-14).
 const SESSIONS_LABEL = "sessions";
 const SESSIONS_WIDTH = 320;
 const SESSIONS_HEIGHT = 380;
@@ -943,9 +943,9 @@ function markBubbleShown(): void {
 // Right-click on the pet toggles the sessions panel. Lifecycle copies the
 // chat mode (acceptance-fix-9): the webview is created visible and never
 // destroyed — toggle = hidden ? show : hide, no page reload either way. The
-// panel closes itself via ×/Esc (hide); deliberately NO light-dismiss (a
-// status surface you glance at, not a conversation you type into — focus
-// loss must not close it).
+// panel closes itself via ×/Esc or light-dismiss (acceptance-fix-14: armed
+// blur → hidePanel), and the 350ms toggle grace below absorbs the race where
+// that blur self-hide lands before this side's visibility probe.
 
 // 轻量兜底（chat 窗 round-6 连点双开 bug 的同款最小防线）：两次快速右键不
 // 得在同一个 "sessions" label 下启动两个 webview。不照搬 chat 的整条串行
