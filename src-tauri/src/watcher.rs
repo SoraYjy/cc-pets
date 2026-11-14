@@ -151,6 +151,9 @@ fn encode_cwd(cwd: &str) -> String {
 }
 
 /// 当前 unix 时间（毫秒）。时钟回退等异常 → 0。
+/// 仅非 unix 平台使用（acceptance-fix-13 主信号制：unix 以 kill-0 为唯一
+/// liveness 信号，staleness 分支已不存在）。
+#[cfg(not(unix))]
 fn system_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -198,7 +201,8 @@ pub fn run_poller<E>(
             return;
         }
 
-        // ---- 1. 扫描 sessions/*.json，过滤出存活且新鲜的 session ----
+        // ---- 1. 扫描 sessions/*.json，过滤出存活的 session（acceptance-
+        // fix-13 主信号制：unix 只按 kill-0 剔除；非 unix 以 staleness 兜底）----
         // v1.2 Task 4：元组扩到五字段（sessionId, cwd, name, status,
         // updatedAtMs）——sessions-snapshot 需要完整行数据，working 聚合与
         // 尾读取用前三项不变。
@@ -219,7 +223,16 @@ pub fn run_poller<E>(
                 if !pid_alive(e.pid) {
                     continue;
                 }
-                // staleness 兜底（>60s 未心跳剔除；同时覆盖 EPERM 误判与 pid 回绕）
+                // staleness 兜底仅限非 unix（acceptance-fix-13 主信号制）：
+                // unix 的 pid_alive 是真 kill(pid, 0)。实测 Claude Code busy
+                // 时 updatedAt 心跳冻结（只在状态迁移时刷新），任务超 60s 就
+                // 会被旧 staleness 误杀——working 聚合 / sessions-snapshot
+                // 看不到它、忙中通知丢失。忙碌会话必须持续可见：unix 上
+                // staleness 不再剔除。取舍（README 已知限制同步）：EPERM 误
+                // 判活进程为死时该会话立即消失（macOS 同用户近乎不可达），
+                // pid 回绕的幻影条目风险回到「罕见但存在」；非 unix 平台
+                // pid_alive 恒 true，staleness 是唯一 liveness 信号（现状）。
+                #[cfg(not(unix))]
                 if system_time_ms().saturating_sub(e.updated_at_ms) > 60_000 {
                     continue;
                 }
@@ -335,8 +348,9 @@ pub fn run_poller<E>(
         // 前文件长度起跳，回合中段追加的 turn_duration 行被永久跳过，通知
         // 就此丢失。保留状态后，重新入选从上次 offset 续读，间隙内完成的
         // 回合照常出 turn-complete。状态量 = 见过的 sid 数（个位数字节 ×
-        // 注册表条目数），内存可忽略；staleness 本身仍继续拦截 pid 回绕
-        // （陈旧条目 updatedAt 老，不因 pid 复活变新鲜）。
+        // 注册表条目数），内存可忽略。（acceptance-fix-13 后 unix 上已无
+        // staleness 间隙——live 会话恒在 alive、持续续读；本保留机制在
+        // unix 上仅剩「注册表重写瞬间」的窄窗，在非 unix 平台承担原职责。）
 
         // ---- 5. sessions-snapshot（v1.2 Task 4）：每 tick 末尾对 alive 列表
         // 整体 emit——右键猫呼出的会话面板数据源。payload 小（N×5 字段），
@@ -500,11 +514,22 @@ mod poller_tests {
             .as_millis() as u64
     }
 
-    /// 造 fixture：sessions/<pid>.json（pid=测试进程自身，保 pid_alive 通过）
-    /// + projects/<encode(cwd)>/test-sid.jsonl（end_turn 文本行 + turn_duration 行）。
-    /// 返回 cwd 字符串供断言用。
-    fn make_fixture(dir: &std::path::Path, updated_at: u64) -> String {
-        let pid = std::process::id();
+    /// 造一个「确定已死」的真实 pid：spawn 一个立即退出的子进程并 wait 收尸。
+    /// wait 后短时间内不会被系统复用，测试窗口内 kill-0 稳定失败。
+    fn spawn_dead_pid() -> u32 {
+        let mut child = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn dead-pid helper (sleep 0)");
+        let pid = child.id();
+        let _ = child.wait();
+        pid
+    }
+
+    /// 造 fixture：sessions/<pid>.json（pid 由调用方给——活测用测试进程 pid
+    /// 保 pid_alive 通过，死测用 spawn_dead_pid）+ projects/<encode(cwd)>/
+    /// test-sid.jsonl（end_turn 文本行 + turn_duration 行）。返回 cwd 供断言。
+    fn make_fixture(dir: &std::path::Path, updated_at: u64, pid: u32) -> String {
         let cwd = dir.to_str().unwrap().to_string();
 
         let sess_dir = dir.join("sessions");
@@ -587,7 +612,7 @@ mod poller_tests {
     #[test]
     fn test_status_event_emitted() {
         let tmp = tempfile::tempdir().unwrap();
-        make_fixture(tmp.path(), now_ms());
+        make_fixture(tmp.path(), now_ms(), std::process::id());
         let (rx, stop) = spawn_poller(tmp.path());
 
         let hit = wait_for(
@@ -608,7 +633,7 @@ mod poller_tests {
     #[test]
     fn test_first_sight_no_replay_then_append_emits() {
         let tmp = tempfile::tempdir().unwrap();
-        let cwd = make_fixture(tmp.path(), now_ms());
+        let cwd = make_fixture(tmp.path(), now_ms(), std::process::id());
         let (rx, stop) = spawn_poller(tmp.path());
 
         // 给足若干 tick 吃掉首扫：历史内容不得重放。
@@ -666,7 +691,7 @@ mod poller_tests {
     #[test]
     fn test_summary_truncated_to_4000() {
         let tmp = tempfile::tempdir().unwrap();
-        let cwd = make_fixture(tmp.path(), now_ms());
+        let cwd = make_fixture(tmp.path(), now_ms(), std::process::id());
         let (rx, stop) = spawn_poller(tmp.path());
 
         // 首扫吃掉 fixture（首见不重放），收干首批事件
@@ -707,11 +732,14 @@ mod poller_tests {
     #[test]
     fn test_stale_entry_dropped() {
         let tmp = tempfile::tempdir().unwrap();
-        // updatedAt 距今 120s > 60s 阈值 → 被剔。
+        // acceptance-fix-13 主信号制：unix 上 staleness 不再剔除——死进程仍按
+        // kill-0 剔除。fixture 用「确定已死」的真实 pid（sleep 0 + wait 收尸
+        // ——spawn_dead_pid），120s 前的 updatedAt 同时覆盖非 unix 的
+        // staleness 分支语义。
         // 首 tick 语义：prev_working 初始 None，首 tick 必发一次 session-status，
         // 本例无存活 session，值应为 {"working": false}。断言两条：
         // 1) 全程无 {"working": true}；2) 收到过 {"working": false}。
-        make_fixture(tmp.path(), now_ms() - 120_000);
+        make_fixture(tmp.path(), now_ms() - 120_000, spawn_dead_pid());
         let (rx, stop) = spawn_poller(tmp.path());
 
         // 给足若干 tick（500ms / 20ms ≈ 25 tick），再停并收干
@@ -722,7 +750,7 @@ mod poller_tests {
             !events
                 .iter()
                 .any(|(e, v)| e == "session-status" && *v == json!({"working": true})),
-            "stale entry must not produce working:true, got {:?}",
+            "dead-pid entry must not produce working:true, got {:?}",
             events
         );
         assert!(
@@ -851,21 +879,27 @@ mod poller_tests {
     }
 
     /// 多 session 场景 golden（L3）：A busy / B idle / self-pid busy（pid 进
-    /// self_pids）/ stale busy（updatedAt 过期）。A/B 用真实存活子进程 pid
-    ///（self_pids 按 pid 排除，测试进程自己的 pid 进了集合，不能复用给
-    /// A/B）；self 与 stale 用测试进程 pid。四者 transcript 各预置一轮历史
-    ///（首见不重放），随后按 A→B 顺序追加新回合。预期事件序列恰好为：
+    /// self_pids）/ dead-pid busy（kill-0 剔除）/ frozen-heartbeat busy（心
+    /// 跳冻结 90s，主信号制下必须可见）。A/B/frozen 用真实存活子进程 pid 或
+    /// 测试进程 pid（self_pids 按 pid 排除，测试进程自己的 pid 进了集合，不
+    /// 能复用给 A/B）；self 用测试进程 pid、dead 用 spawn_dead_pid。五者
+    /// transcript 各预置一轮历史（首见不重放），随后按 A→B 顺序追加新回合。
+    /// 预期事件序列恰好为：
     ///   [session-status{working:true}, turn-complete(A 全 payload), turn-complete(B)]
     /// 实现语义要点（以此为准固定为 golden）：
     /// - working:true 首 tick 必发（prev_working 初始 None ≠ Some(true)），
     ///   且 self-pid 的 busy 不计入聚合（self_pids 在 busy 聚合之前排除），
-    ///   stale 的 busy 同样不计（staleness 先剔）；
+    ///   dead 的 busy 同样不计（kill-0 先剔）；frozen 的 busy **计入**——
+    ///   主信号制下心跳冻结的活会话必须可见（acceptance-fix-13），A 已
+    ///   busy 故 working 无翻转、无抖动；
     /// - A/B 顺序由「追加并等到上一事件后再追加下一个」构造性确定
     ///   （read_dir 同 tick 内的顺序不保证，不进 golden）；
     /// - 全程无第二个 session-status（A 恒存活恒 busy，working 无抖动），
-    ///   无 history 重放、无 self/stale 洩漏（二者 transcript 各追加一回
+    ///   无 history 重放、无 self/dead 洩漏（二者 transcript 各追加一回
     ///   合后 poller 继续跑 ≥5 tick——过滤若被删，追加回合必在窗口内出
-    ///   turn-complete 使全等断言确定性变红；正确实现下窗口静默）。
+    ///   turn-complete 使全等断言确定性变红；正确实现下窗口静默）；
+    /// - sessions-snapshot 必须恰好携带 sid-a/sid-b/sid-frozen（frozen 的
+    ///   心跳冻结不得再把它踢出；dead/self 永不得洩入）。
     #[test]
     fn test_golden_multi_session_scene() {
         let tmp = tempfile::tempdir().unwrap();
@@ -879,6 +913,13 @@ mod poller_tests {
             .arg("20")
             .spawn()
             .expect("spawn live-pid helper (sleep)");
+        // frozen 也要独立活 pid：golden 的 poller 把测试进程 pid 登记进了
+        // self_pids（自有 chat 进程语义），frozen 若复用会被该过滤器剔除。
+        let mut proc_frozen = std::process::Command::new("sleep")
+            .arg("20")
+            .spawn()
+            .expect("spawn live-pid helper (sleep)");
+        let dead_pid = spawn_dead_pid();
         let cwd_a = make_session(
             tmp.path(),
             proc_a.id(),
@@ -906,14 +947,23 @@ mod poller_tests {
             now,
             "self 历史回合",
         );
-        let cwd_stale = make_session(
+        let cwd_dead = make_session(
             tmp.path(),
-            std::process::id(),
-            "sid-stale",
-            "stale",
+            dead_pid,
+            "sid-dead",
+            "dead",
             "busy",
             now - 120_000,
-            "stale 历史回合",
+            "dead 历史回合",
+        );
+        let _cwd_frozen = make_session(
+            tmp.path(),
+            proc_frozen.id(),
+            "sid-frozen",
+            "frozen",
+            "busy",
+            now - 90_000,
+            "frozen 历史回合",
         );
 
         // spawn_poller 的 self_pids 为空集，这里需要登记 self-pid 语义 →
@@ -988,18 +1038,18 @@ mod poller_tests {
         );
         assert!(hit.is_some(), "expected turn-complete for B, got {:?}", seen);
 
-        // ④ self / stale 的 transcript 也各追加一回合 —— 必须全程静默。
+        // ④ self / dead 的 transcript 也各追加一回合 —— 必须全程静默
+        //（frozen 不追加：它是主信号制下必须可见的活会话，进 snapshot）。
         append_turn(tmp.path(), &cwd_self, "sid-self", "self 新回合", Some(1000));
-        append_turn(tmp.path(), &cwd_stale, "sid-stale", "stale 新回合", Some(1000));
+        append_turn(tmp.path(), &cwd_dead, "sid-dead", "dead 新回合", Some(1000));
 
         // ⑤ 保持 poller 运行 ≥5 tick（100ms / 20ms）：给过滤回归留出确定性
         // 显形窗口。若 self_pids 过滤被删，self session 将被首见（offset=历
-        // 史长度，跳过历史）并读走 ④ 的追加回合 → tc(self) 出现；若
-        // staleness 过滤被删，stale session 同理出 tc(stale)。二者的 busy
-        // 即使计入聚合也不改变 working（A 已 busy，无翻转），故回归场景下
-        // drain 恰好多出的只有 turn-complete——全等断言必红。正确实现下两
-        // 腿在 metadata 读之前即被 continue，追加内容永远不被读，窗口内确
-        // 定性静默。
+        // 史长度，跳过历史）并读走 ④ 的追加回合 → tc(self) 出现；若 kill-0
+        // 剔除被删，dead session 同理出 tc(dead)。二者的 busy 即使计入聚合
+        // 也不改变 working（A 已 busy，无翻转），故回归场景下 drain 恰好多
+        // 出的只有 turn-complete——全等断言必红。正确实现下两腿在 metadata
+        // 读之前即被 continue，追加内容永远不被读，窗口内确定性静默。
         thread::sleep(Duration::from_millis(100));
 
         // 收干并固定整场 golden：事件序列恰好为 [status, tc(A), tc(B)]，
@@ -1009,12 +1059,14 @@ mod poller_tests {
         // poller 已停，存活探针子进程即可收殓（sleep 自限时是兜底）。
         let _ = proc_a.kill();
         let _ = proc_b.kill();
+        let _ = proc_frozen.kill();
 
         // ⑥ v1.2 Task 4：sessions-snapshot 每 tick 携行（独立事件流，payload
         // 形状由专门单测钉），golden 全等只针对 status/turn-complete 流——
         // 过滤后再比。快照自身的过滤语义另行断言：snapshot 必须恰好携带
-        // sid-a/sid-b，self/stale 永不得洩入（快照级回归钉，与上面的尾读级
-        // tc 静默互补——若 self_pids/staleness 过滤被删，这里与 tc 双双显红）。
+        // sid-a/sid-b/sid-frozen（frozen 心跳冻结仍可见——主信号制回归钉），
+        // self/dead 永不得洩入（快照级回归钉，与上面的尾读级 tc 静默互补——
+        // 若 self_pids/kill-0 过滤被删，这里与 tc 双双显红）。
         assert!(
             seen.iter().any(|(e, _)| e == "sessions-snapshot"),
             "every tick must carry a sessions-snapshot, got {:?}",
@@ -1027,8 +1079,12 @@ mod poller_tests {
         {
             assert_eq!(
                 snapshot_session_ids(v),
-                vec!["sid-a".to_string(), "sid-b".to_string()],
-                "snapshot must carry exactly the two live sessions (self/stale excluded), got {v}"
+                vec![
+                    "sid-a".to_string(),
+                    "sid-b".to_string(),
+                    "sid-frozen".to_string()
+                ],
+                "snapshot must carry the live sessions incl. frozen-heartbeat one (self/dead excluded), got {v}"
             );
         }
         let streamed: Vec<Ev> = seen
@@ -1102,18 +1158,19 @@ mod poller_tests {
         }
     }
 
-    /// staleness 间隙后续读（acceptance round 2 修复的回归钉）：session A
-    /// 先入监听（首见 offset 记在历史长度）→ 注册表 updatedAt 过期一轮
-    ///（被剔出 alive）→ 间隙内 transcript 追加新回合 → updatedAt 刷新恢复
-    /// 入选后，尾读器/offset 必须跨间隙保留：补读间隙内回合（turn-complete
-    /// 到达），且间隙前历史不重放。旧实现（间隙销毁尾读器、复活按首见从
-    /// 当前长度起跳）在本测试下 turn-complete 永不到达而超时失败。
+    /// 排除间隙后续读（acceptance round 2 修复的回归钉，fix-13 形态适配）：
+    /// session A 先入监听（首见 offset 记在历史长度）→ 注册表条目改指「确
+    /// 定已死」的 pid（kill-0 剔出 alive——unix 上 staleness 已不参与剔除）
+    /// → 间隙内 transcript 追加新回合 → 条目改回活 pid（会话重启/恢复场景）
+    /// 重新入选后，尾读器/offset 必须跨间隙保留：补读间隙内回合
+    ///（turn-complete 到达），且间隙前历史不重放。旧实现（间隙销毁尾读器、
+    /// 复活按首见从当前长度起跳）在本测试下 turn-complete 永不到达而超时失败。
     #[test]
     fn test_staleness_gap_resumes_offset() {
         let tmp = tempfile::tempdir().unwrap();
         // make_fixture：busy session（sid=test-sid，pid=测试进程）+ 预置一轮
         // 历史回合（摘要「任务完成摘要」，首见不重放）。
-        let cwd = make_fixture(tmp.path(), now_ms());
+        let cwd = make_fixture(tmp.path(), now_ms(), std::process::id());
         let (rx, stop) = spawn_poller(tmp.path());
         let mut seen: Vec<Ev> = Vec::new();
 
@@ -1131,16 +1188,18 @@ mod poller_tests {
             seen
         );
 
-        // ② 制造 staleness 间隙：updatedAt 过期 → A 被剔 ≥7 tick。
+        // ② 制造排除间隙：注册表条目改指「确定已死」的 pid → kill-0 剔除
+        // ≥7 tick（updatedAt 保持 now——unix 上它已不参与剔除判定）。
+        let dead_pid = spawn_dead_pid();
         let sess = tmp
             .path()
             .join("sessions")
             .join(format!("{}.json", std::process::id()));
         let stale = format!(
             r#"{{"pid":{},"sessionId":"test-sid","cwd":"{}","name":"t","status":"busy","updatedAt":{}}}"#,
-            std::process::id(),
+            dead_pid,
             cwd,
-            now_ms() - 120_000
+            now_ms()
         );
         std::fs::write(&sess, stale).unwrap();
         thread::sleep(Duration::from_millis(150));
@@ -1148,8 +1207,8 @@ mod poller_tests {
         // ③ 间隙内追加新回合（被剔期间不得读、不得发）。
         append_turn(tmp.path(), &cwd, "test-sid", "间隙内完成", Some(61000));
 
-        // ④ 恢复：updatedAt 刷新 → 重新入选，从保留的 offset 续读 →
-        // 间隙回合补发 turn-complete。
+        // ④ 恢复：条目改回活 pid（会话重启/恢复）→ 重新入选，从保留的
+        // offset 续读 → 间隙回合补发 turn-complete。
         let fresh = format!(
             r#"{{"pid":{},"sessionId":"test-sid","cwd":"{}","name":"t","status":"busy","updatedAt":{}}}"#,
             std::process::id(),
@@ -1195,5 +1254,53 @@ mod poller_tests {
             "pre-gap summary must never appear, got {:?}",
             seen
         );
+    }
+
+    /// 主信号制回归钉（acceptance-fix-13）：busy 会话 updatedAt 冻结在 90s
+    /// 前（> 旧 60s staleness 阈值）、pid 真实存活（测试进程）→ 必须留在
+    /// alive：sessions-snapshot 携带它（status=busy 如实透传）、working 聚合
+    /// 为 true。旧实现（staleness 先剔）下 snapshot 永不含 sid-busy、working
+    /// 恒 false——本测试必红。
+    #[test]
+    fn test_busy_frozen_heartbeat_stays_visible() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_session(
+            tmp.path(),
+            std::process::id(),
+            "sid-busy",
+            "busy-90s",
+            "busy",
+            now_ms() - 90_000,
+            "busy 历史回合",
+        );
+        let (rx, stop) = spawn_poller(tmp.path());
+
+        // recv_collect 全程留痕：working:true（首 tick、先于 snapshot）与
+        // snapshot 都要留在 seen 里供断言——wait_for 会丢弃非匹配事件。
+        let mut seen: Vec<Ev> = Vec::new();
+        let hit = recv_collect(
+            &rx,
+            |(e, v)| {
+                e == "sessions-snapshot"
+                    && snapshot_session_ids(v) == vec!["sid-busy".to_string()]
+            },
+            Duration::from_secs(2),
+            &mut seen,
+        );
+        assert!(
+            hit.is_some(),
+            "frozen-heartbeat busy session must stay visible in the snapshot"
+        );
+
+        let rest = stop_and_drain(&stop, &rx);
+        seen.extend(rest);
+        assert!(
+            seen.iter()
+                .any(|(e, v)| e == "session-status" && *v == json!({"working": true})),
+            "busy aggregation must count the frozen-heartbeat session, got {:?}",
+            seen
+        );
+        let snapshot = hit.expect("checked above");
+        assert_eq!(snapshot.1["sessions"][0]["status"], "busy");
     }
 }
