@@ -35,6 +35,8 @@ const settingsToggle = document.getElementById("settings-toggle") as HTMLButtonE
 const settingsPanel = document.getElementById("settings-panel") as HTMLElement;
 const alphaRange = document.getElementById("alpha") as HTMLInputElement;
 const alphaValue = document.getElementById("alpha-value") as HTMLElement;
+const petZoomRange = document.getElementById("pet-zoom") as HTMLInputElement;
+const petZoomValue = document.getElementById("pet-zoom-value") as HTMLElement;
 const styleChips = Array.from(document.querySelectorAll<HTMLButtonElement>(".chip"));
 const clearBtn = document.getElementById("clear-screen") as HTMLButtonElement;
 const restartBtn = document.getElementById("restart-session") as HTMLButtonElement;
@@ -415,23 +417,43 @@ interface SettingsPayload {
   style: string;
   opacity: number;
   petSkin?: string;
+  pet_zoom?: number;
 }
 
 let currentStyle: ThemeStyle = "c";
 let currentOpacity = 0.92;
 let currentSkin = "default";
+let currentPetZoom = 1.0;
 
-// apply = swap the body theme class + write the CSS alpha variable. The window
-// background and every theme rule read the class / --win-alpha live, so this
-// one function is the whole "make it so" (normalize also guards hand-edited
-// settings.json values).
-function applySettings(style: string | undefined, opacity: number): void {
+// Mirrors the Rust clamp (settings.rs clamp_pet_zoom): NaN/negative → 1.0,
+// else clamp into [0.5, 1.5].
+function clampPetZoom(z: number): number {
+  if (Number.isNaN(z) || z < 0) return 1.0;
+  return Math.min(1.5, Math.max(0.5, z));
+}
+
+// apply = swap the body theme class + write the CSS alpha variable + sync the
+// zoom slider UI. The window background and every theme rule read the class /
+// --win-alpha live, so this one function is the whole "make it so" (normalize
+// also guards hand-edited settings.json values). petZoom only updates the
+// slider UI here — the pet window owns its own transform via the
+// pet-zoom-changed event (and loads settings itself at startup).
+function applySettings(
+  style: string | undefined,
+  opacity: number,
+  petZoom?: number,
+): void {
   currentStyle = normalizeStyle(style);
   currentOpacity = clampOpacity(opacity);
+  if (petZoom !== undefined) {
+    currentPetZoom = clampPetZoom(petZoom);
+  }
   document.body.className = `theme-${currentStyle}`;
   document.documentElement.style.setProperty("--win-alpha", String(currentOpacity));
   alphaRange.value = String(currentOpacity);
   alphaValue.textContent = String(currentOpacity);
+  petZoomRange.value = String(currentPetZoom);
+  petZoomValue.textContent = currentPetZoom.toFixed(2);
   for (const chip of styleChips) {
     chip.classList.toggle("active", chip.dataset.style === currentStyle);
   }
@@ -444,6 +466,7 @@ function saveSettings(): void {
     style: currentStyle,
     opacity: currentOpacity,
     petSkin: currentSkin,
+    petZoom: currentPetZoom,
   }).catch((err: unknown) => {
     console.error("save_settings failed:", err);
     logLine(`[chat] save_settings failed: ${String(err)}`);
@@ -535,6 +558,18 @@ alphaRange.addEventListener("input", () => {
 });
 alphaRange.addEventListener("change", saveSettings);
 
+// 大小滑杆（acceptance-fix-12）：input 即时 emit pet-zoom-changed（pet 窗实时
+// transform 缩放并同步命中映射），change 才 save（pet_zoom 持久化）。
+petZoomRange.addEventListener("input", () => {
+  currentPetZoom = clampPetZoom(Number(petZoomRange.value));
+  petZoomValue.textContent = currentPetZoom.toFixed(2);
+  void emit("pet-zoom-changed", { zoom: currentPetZoom }).catch((err: unknown) => {
+    console.error("pet-zoom-changed emit failed:", err);
+    logLine(`[chat] pet-zoom-changed emit failed: ${String(err)}`);
+  });
+});
+petZoomRange.addEventListener("change", saveSettings);
+
 // ===== 清屏 / 重开会话（acceptance-fix-10）=====
 
 // DOM/引用复位范围与 renderHistory 的清空一致（含流式占位与打字点）；
@@ -618,13 +653,13 @@ restartBtn.addEventListener("click", () => {
 // 芯片 DOM，后到的 syncSkinChipActive 兜住高亮，不会互相覆盖。
 void invoke<SettingsPayload>("get_settings")
   .then((s) => {
-    applySettings(s.style, s.opacity);
+    applySettings(s.style, s.opacity, s.pet_zoom);
     currentSkin = normalizePetSkin(s.petSkin);
     syncSkinChipActive();
   })
   .catch((err: unknown) => {
     console.error("get_settings failed, falling back to defaults:", err);
-    applySettings("c", 0.92);
+    applySettings("c", 0.92, 1.0);
     logLine(`[chat] get_settings failed, defaults applied: ${String(err)}`);
   });
 

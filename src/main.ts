@@ -27,6 +27,18 @@ const CELL_H = 208;
 const SHEET_W = CELL_W * 8; // 1536px — spritesheet grid is 8 columns
 const SHEET_H = CELL_H * 4; // 832px — spritesheet grid is 4 rows
 
+// Runtime pet zoom (acceptance-fix-12): the pet window is oversized to
+// 288×312 (=1.5× headroom, transparent so no visual cost); the sprite layer
+// stays 192×208 and grows via transform: scale() anchored bottom-center —
+// feet stay planted on the same floor line, horizontal center never drifts.
+// The pixel hit-test mask maps window coords back through the same transform
+// (see alphaAt).
+const PET_WIN_W = 288;
+const PET_WIN_H = 312;
+const ELEM_X = (PET_WIN_W - CELL_W) / 2; // 48 — sprite layer offset in window
+const ELEM_Y = PET_WIN_H - CELL_H;       // 104
+let petZoom = 1.0;
+
 const DRAG_THRESHOLD_PX = 4; // movement beyond this starts a window drag
 const CLICK_MAX_MS = 400; // presses longer than this never count as a click
 
@@ -257,17 +269,40 @@ async function loadAlphaMask(url: string = `${PET_BASE}/spritesheet.png`): Promi
   }
 }
 
-// Logical cursor position → alpha of the on-screen sprite pixel. The pet
-// element spans the whole 192×208 window, so client coords are element
-// coords; the fractional position maps into the current cell of the sheet.
-function alphaAt(x: number, y: number): number {
+// Logical cursor position → alpha of the on-screen sprite pixel. The sprite
+// layer (192×208) sits offset (ELEM_X, ELEM_Y) inside the oversized window
+// and is scaled by petZoom around its bottom-center; a window point maps back
+// through the inverse transform:
+//   sprite = origin + (window − layer offset − origin) / zoom
+// with origin = (CELL_W/2, CELL_H) in layer coords. At zoom 1.0 this reduces
+// to the legacy (x − ELEM_X, y − ELEM_Y) element mapping — pixel-identical.
+function alphaAt(wx: number, wy: number): number {
   if (!sheetAlpha) return 255; // no mask → treat everything as opaque
-  const fx = x / CELL_W;
-  const fy = y / CELL_H;
+  const lx = CELL_W / 2 + (wx - ELEM_X - CELL_W / 2) / petZoom;
+  const ly = CELL_H + (wy - ELEM_Y - CELL_H) / petZoom;
+  const fx = lx / CELL_W;
+  const fy = ly / CELL_H;
   if (fx < 0 || fx >= 1 || fy < 0 || fy >= 1) return 0;
   const px = Math.min(SHEET_W - 1, Math.floor((curFrame.col + fx) * CELL_W));
   const py = Math.min(SHEET_H - 1, Math.floor((curFrame.row + fy) * CELL_H));
   return sheetAlpha[(py * SHEET_W + px) * 4 + 3];
+}
+
+// Mirrors the Rust clamp (settings.rs clamp_pet_zoom): NaN/negative → 1.0,
+// else clamp into [0.5, 1.5].
+function clampPetZoom(z: number): number {
+  if (Number.isNaN(z) || z < 0) return 1.0;
+  return Math.min(1.5, Math.max(0.5, z));
+}
+
+// ⚙ 大小滑杆 / 启动设置（acceptance-fix-12）：transform: scale() 以
+// bottom-center 为原点——脚贴同一地面线、水平中心不漂（合成器路径，无重排）。
+// 命中映射（alphaAt）读同一 petZoom，缩放后点击穿透仍贴合猫体。
+function applyPetZoom(z: number): void {
+  petZoom = clampPetZoom(z);
+  if (petEl) {
+    petEl.style.transform = `scale(${petZoom})`;
+  }
 }
 
 let ignorePollTimer: number | null = null;
@@ -387,6 +422,12 @@ function setupListeners(): void {
   void listen<SessionStatusPayload>("session-status", (e) => {
     sessionAnimName = e.payload.working ? "working" : "idle";
     playAnimation(sessionAnimName);
+  });
+
+  // ⚙ 大小滑杆（acceptance-fix-12）：chat 窗 input 即时 emit，pet 实时缩放
+  // 并同步命中映射（alphaAt 读同一 petZoom）。
+  void listen<{ zoom: number }>("pet-zoom-changed", (e) => {
+    applyPetZoom(clampPetZoom(e.payload.zoom));
   });
 
   void listen<TurnCompletePayload>("turn-complete", (e) => {
@@ -1076,12 +1117,15 @@ function setupPointerInteractions(): void {
 async function init(): Promise<void> {
   // petSkin 来自 settings（load 侧已把空/空白归一化 "default"）；读取失败
   // 不挡挂载——退默认皮肤（resolveSheetPath 三级回退到根 spritesheetPath）。
-  const settings = await invoke<{ petSkin?: string }>("get_settings").catch(
+  const settings = await invoke<{ petSkin?: string; pet_zoom?: number }>("get_settings").catch(
     (err: unknown) => {
       console.error("get_settings failed, using default skin:", err);
       return null;
     },
   );
+  // Pet zoom comes from the same settings blob; set the state BEFORE mount
+  // so the freshly created element is born at the persisted scale.
+  applyPetZoom(settings?.pet_zoom ?? 1.0);
   await mountPet(settings?.petSkin);
 }
 
@@ -1098,6 +1142,13 @@ async function mountPet(petSkin?: string): Promise<void> {
     el.id = "pet";
     el.style.width = `${CELL_W}px`;
     el.style.height = `${CELL_H}px`;
+    // Acceptance-fix-12: the window is oversized (288×312); the sprite layer
+    // is anchored bottom-center so transform: scale(petZoom) grows it upward
+    // from the same floor line without drifting horizontally.
+    el.style.left = `${ELEM_X}px`;
+    el.style.top = `${ELEM_Y}px`;
+    el.style.transformOrigin = "center bottom";
+    el.style.transform = `scale(${petZoom})`;
     el.style.backgroundSize = `${SHEET_W}px ${SHEET_H}px`;
     el.style.backgroundRepeat = "no-repeat";
     el.style.imageRendering = "pixelated";

@@ -1,13 +1,16 @@
 use std::path::{Path, PathBuf};
 
 /// 聊天窗设置：style 三选一（"a"|"b"|"c"，默认 "c"），opacity ∈ [0.3,1.0]（默认 0.92），
-/// petSkin 宠物皮肤 id（默认 "default"，v1.2 多皮肤）。
+/// petSkin 宠物皮肤 id（默认 "default"，v1.2 多皮肤），
+/// pet_zoom ∈ [0.5,1.5]（默认 1.0，猫的运行时显示缩放）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub style: String,
     pub opacity: f32,
     #[serde(rename = "petSkin", default = "default_pet_skin")]
     pub pet_skin: String,
+    #[serde(default = "default_pet_zoom")]
+    pub pet_zoom: f32,
 }
 
 const DEFAULT_STYLE: &str = "c";
@@ -15,9 +18,16 @@ const DEFAULT_OPACITY: f32 = 0.92;
 const OPACITY_MIN: f32 = 0.3;
 const OPACITY_MAX: f32 = 1.0;
 const DEFAULT_PET_SKIN: &str = "default";
+const PET_ZOOM_MIN: f32 = 0.5;
+const PET_ZOOM_MAX: f32 = 1.5;
+const PET_ZOOM_DEFAULT: f32 = 1.0;
 
 fn default_pet_skin() -> String {
     DEFAULT_PET_SKIN.to_string()
+}
+
+fn default_pet_zoom() -> f32 {
+    PET_ZOOM_DEFAULT
 }
 
 fn defaults() -> Settings {
@@ -25,6 +35,7 @@ fn defaults() -> Settings {
         style: DEFAULT_STYLE.into(),
         opacity: DEFAULT_OPACITY,
         pet_skin: default_pet_skin(),
+        pet_zoom: PET_ZOOM_DEFAULT,
     }
 }
 
@@ -37,6 +48,15 @@ fn clamp_opacity(o: f32) -> f32 {
         return DEFAULT_OPACITY;
     }
     o.clamp(OPACITY_MIN, OPACITY_MAX)
+}
+
+/// NaN/负值回默认 1.0（NaN 表示损坏、负值表示明确的重置意图），其余夹进
+/// [0.5, 1.5]。
+fn clamp_pet_zoom(z: f32) -> f32 {
+    if z.is_nan() || z < 0.0 {
+        return PET_ZOOM_DEFAULT;
+    }
+    z.clamp(PET_ZOOM_MIN, PET_ZOOM_MAX)
 }
 
 /// 设置文件路径：`~/.lynn-widget/settings.json`（父目录在 save 时创建）。
@@ -72,10 +92,16 @@ pub fn load_from(path: &Path) -> Settings {
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => DEFAULT_PET_SKIN.to_string(),
     };
+    let pet_zoom = v
+        .get("pet_zoom")
+        .and_then(|o| o.as_f64())
+        .map(|o| o as f32)
+        .unwrap_or(PET_ZOOM_DEFAULT);
     Settings {
         style,
         opacity: clamp_opacity(opacity),
         pet_skin,
+        pet_zoom: clamp_pet_zoom(pet_zoom),
     }
 }
 
@@ -105,10 +131,11 @@ pub fn get_settings() -> Settings {
     load()
 }
 
-/// 前端改动设置时保存；style 非法拒收（Err），opacity 越域 clamp 后照存不报错，
-/// petSkin 空/空白归一化 "default" 后照存（不校验在皮肤集内，可用性归前端）。
+/// 前端改动设置时保存；style 非法拒收（Err），opacity/pet_zoom 越域 clamp
+/// 后照存不报错，petSkin 空/空白归一化 "default" 后照存（不校验在皮肤集内，
+/// 可用性归前端）。
 #[tauri::command]
-pub fn save_settings(style: String, opacity: f32, pet_skin: String) -> Result<(), String> {
+pub fn save_settings(style: String, opacity: f32, pet_skin: String, pet_zoom: f32) -> Result<(), String> {
     if !valid_style(&style) {
         return Err(format!("invalid style: {style} (expected a|b|c)"));
     }
@@ -121,6 +148,7 @@ pub fn save_settings(style: String, opacity: f32, pet_skin: String) -> Result<()
         style,
         opacity: clamp_opacity(opacity),
         pet_skin,
+        pet_zoom: clamp_pet_zoom(pet_zoom),
     })
 }
 
@@ -142,7 +170,8 @@ mod tests {
             Settings {
                 style: "c".into(),
                 opacity: 0.92,
-                pet_skin: "default".into()
+                pet_skin: "default".into(),
+                pet_zoom: 1.0
             }
         );
     }
@@ -156,7 +185,8 @@ mod tests {
             Settings {
                 style: "c".into(),
                 opacity: 0.92,
-                pet_skin: "default".into()
+                pet_skin: "default".into(),
+                pet_zoom: 1.0
             }
         );
     }
@@ -201,8 +231,35 @@ mod tests {
             style: "b".into(),
             opacity: 0.5,
             pet_skin: "official".into(),
+            pet_zoom: 0.8,
         };
         save_to(&path, &s).expect("save");
         assert_eq!(load_from(&path), s);
+    }
+
+    #[test]
+    fn test_load_pet_zoom_clamped() {
+        // 2.0 → 1.5、0.1 → 0.5（越域夹取）；字段缺失 → 默认 1.0。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hi = dir.path().join("hi.json");
+        std::fs::write(&hi, r#"{"style":"a","pet_zoom":2.0}"#).expect("write");
+        assert_eq!(load_from(&hi).pet_zoom, 1.5);
+        let lo = dir.path().join("lo.json");
+        std::fs::write(&lo, r#"{"style":"a","pet_zoom":0.1}"#).expect("write");
+        assert_eq!(load_from(&lo).pet_zoom, 0.5);
+        let miss = dir.path().join("miss.json");
+        std::fs::write(&miss, r#"{"style":"a"}"#).expect("write");
+        assert_eq!(load_from(&miss).pet_zoom, 1.0);
+    }
+
+    #[test]
+    fn test_clamp_pet_zoom() {
+        // NaN/负值回默认 1.0；越域夹取；域内原样。
+        assert_eq!(clamp_pet_zoom(f32::NAN), 1.0);
+        assert_eq!(clamp_pet_zoom(-3.0), 1.0);
+        assert_eq!(clamp_pet_zoom(2.0), 1.5);
+        assert_eq!(clamp_pet_zoom(0.1), 0.5);
+        assert_eq!(clamp_pet_zoom(1.0), 1.0);
+        assert_eq!(clamp_pet_zoom(0.8), 0.8);
     }
 }
