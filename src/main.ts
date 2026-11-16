@@ -15,6 +15,7 @@ import {
 } from "./format";
 import { pushCapped, type ChatEntry } from "./history";
 import {
+  decideCursorIgnore,
   frameAt,
   loadPet,
   offsetFor,
@@ -251,6 +252,7 @@ let sheetAlpha: Uint8ClampedArray | null = null; // RGBA of the whole sheet
 let alphaMaskUrl: string | null = null; // sheet the mask was decoded from
 let ignoringMouse = false;
 let dragging = false; // hoisted so the hit-test probe can pin non-ignore
+let pointerPressed = false; // mousedown→mouseup 之间：轮询/命中探针禁止翻穿透
 
 async function loadAlphaMask(url: string = `${PET_BASE}/spritesheet.png`): Promise<void> {
   try {
@@ -264,6 +266,7 @@ async function loadAlphaMask(url: string = `${PET_BASE}/spritesheet.png`): Promi
     ctx.drawImage(bitmap, 0, 0);
     sheetAlpha = ctx.getImageData(0, 0, SHEET_W, SHEET_H).data;
     alphaMaskUrl = url;
+    startCursorPoll(); // 蒙版就绪，恒定轮询上线（幂等，换肤重解码不会叠加）
   } catch (err) {
     // No mask → hit testing stays off entirely (window behaves as before).
     showDebug(`alpha mask load failed: ${errorText(err)}`);
@@ -299,58 +302,58 @@ function applyPetZoom(z: number): void {
   }
 }
 
-let ignorePollTimer: number | null = null;
-
-function stopIgnorePoll(): void {
-  if (ignorePollTimer !== null) {
-    clearInterval(ignorePollTimer);
-    ignorePollTimer = null;
-  }
+// One global-cursor probe → window-logical coords → sprite alpha. 255 when
+// the mask isn't loaded yet (poll then keeps the window clickable, same as
+// the pre-mask default).
+async function probeCursorAlpha(): Promise<number> {
+  if (!sheetAlpha) return 255;
+  const win = getCurrentWindow();
+  const [cursor, origin, sf] = await Promise.all([
+    cursorPosition(),
+    win.outerPosition(),
+    win.scaleFactor(),
+  ]);
+  return alphaAt((cursor.x - origin.x) / sf, (cursor.y - origin.y) / sf);
 }
 
-// While ignored the webview receives NO events (tauri v2's
-// setIgnoreCursorEvents has no forward option), so a low-frequency poll
-// watches the global cursor and flips back to non-ignore as soon as it
-// re-enters the cat's opaque pixels.
-function startIgnorePoll(): void {
-  if (ignorePollTimer !== null) return;
-  const win = getCurrentWindow();
-  ignorePollTimer = window.setInterval(() => {
-    if (!ignoringMouse) {
-      stopIgnorePoll();
-      return;
-    }
+// 全局光标轮询（恒定运行，蒙版就绪后启动，双向翻转）：macOS 只给 key 窗口
+// 投递 mouse-moved，pet 窗失焦后 applyHitTesting 收不到事件，ignore 状态会
+// 冻结在「可点击」——整个窗口矩形（含透明区）都吃点击/拖拽/右键（即「可点
+// 击区域大于形象」）。轮询补上失焦态：透明 → 置穿透（新增）；不透明 → 翻回
+// 可点（既有行为，ignored 时 webview 收不到任何事件、唯有全局轮询能救）。
+let cursorPollTimer: number | null = null;
+
+function startCursorPoll(): void {
+  if (cursorPollTimer !== null) return;
+  cursorPollTimer = window.setInterval(() => {
     void (async () => {
-      const [cursor, origin, sf] = await Promise.all([
-        cursorPosition(),
-        win.outerPosition(),
-        win.scaleFactor(),
-      ]);
-      const lx = (cursor.x - origin.x) / sf;
-      const ly = (cursor.y - origin.y) / sf;
-      if (ignoringMouse && alphaAt(lx, ly) >= ALPHA_THRESHOLD) {
-        setIgnoreMouse(false);
-      }
+      const busy = pointerPressed || dragging;
+      const ignore = decideCursorIgnore(await probeCursorAlpha(), busy, ALPHA_THRESHOLD);
+      setIgnoreMouse(ignore, "poll");
     })().catch((err: unknown) => {
       // Fail open: any probe failure returns the window to clickable.
-      console.error("ignore poll failed:", err);
-      setIgnoreMouse(false);
+      console.error("cursor poll failed:", err);
+      setIgnoreMouse(false, "poll-error");
     });
   }, 100);
 }
 
-function setIgnoreMouse(ignore: boolean): void {
+function setIgnoreMouse(
+  ignore: boolean,
+  source: "move" | "poll" | "poll-error" | "drag" = "move",
+): void {
   if (ignoringMouse === ignore) return; // only flip on state change
   ignoringMouse = ignore;
-  if (ignore) startIgnorePoll();
-  else stopIgnorePoll();
+  // 诊断钉：每次翻转落日志，验收时可确认失焦态的翻转确实来自 poll。
+  void invoke("append_debug", { line: `hit-test: ignore=${ignore} via ${source}` }).catch(
+    () => {},
+  );
   getCurrentWindow()
     .setIgnoreCursorEvents(ignore)
     .catch((err: unknown) => {
       // Fail open: permission/IPC failure must not leave the pet unclickable.
       console.error("setIgnoreCursorEvents failed:", err);
       ignoringMouse = false;
-      stopIgnorePoll();
     });
 }
 
@@ -359,11 +362,15 @@ function setIgnoreMouse(ignore: boolean): void {
 // While dragging, pin non-ignore (a drag must never lose its window).
 function applyHitTesting(e: MouseEvent): void {
   if (!sheetAlpha) return;
-  if (dragging) {
-    setIgnoreMouse(false);
+  // 手势进行中钉住可点：拖拽绝不能丢窗口；按下中翻穿透会吃掉 mouseup。
+  if (pointerPressed || dragging) {
+    setIgnoreMouse(false, "drag");
     return;
   }
-  setIgnoreMouse(alphaAt(e.clientX, e.clientY) < ALPHA_THRESHOLD);
+  setIgnoreMouse(
+    decideCursorIgnore(alphaAt(e.clientX, e.clientY), false, ALPHA_THRESHOLD),
+    "move",
+  );
 }
 
 // ===== Backend events =====
@@ -1097,14 +1104,13 @@ function setupGlobalErrorHooks(): void {
 // native window drag (fired exactly once per press); mouseup that never
 // dragged and stays within thresholds counts as a click on the pet.
 function setupPointerInteractions(): void {
-  let pressed = false;
   let x0 = 0;
   let y0 = 0;
   let t0 = 0;
 
   document.addEventListener("mousedown", (e: MouseEvent) => {
     if (e.button !== 0) return;
-    pressed = true;
+    pointerPressed = true;
     dragging = false;
     x0 = e.clientX;
     y0 = e.clientY;
@@ -1113,7 +1119,7 @@ function setupPointerInteractions(): void {
 
   document.addEventListener("mousemove", (e: MouseEvent) => {
     applyHitTesting(e); // alpha probe runs on every move (see hit-testing block)
-    if (!pressed || dragging) return;
+    if (!pointerPressed || dragging) return;
     const dist = Math.hypot(e.clientX - x0, e.clientY - y0);
     if (dist > DRAG_THRESHOLD_PX) {
       dragging = true;
@@ -1124,8 +1130,8 @@ function setupPointerInteractions(): void {
   });
 
   document.addEventListener("mouseup", (e: MouseEvent) => {
-    if (!pressed) return;
-    pressed = false;
+    if (!pointerPressed) return;
+    pointerPressed = false;
     if (!dragging && e.button === 0) {
       const dist = Math.hypot(e.clientX - x0, e.clientY - y0);
       const dt = performance.now() - t0;

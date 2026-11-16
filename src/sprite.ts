@@ -22,6 +22,17 @@ export function shouldWriteFrame(
   return prev === null || prev.row !== next.row || prev.col !== next.col;
 }
 
+// 命中判定（纯函数，验收修复「可点击区域大于形象」）：busy（按下/拖拽进行
+// 中）恒 false——手势中途翻穿透会吃掉后续 mouseup/拖不动窗口；其余按 alpha
+// 与阈值判定，低于阈值的透明像素 → 穿透。
+export function decideCursorIgnore(
+  alpha: number,
+  busy: boolean,
+  threshold: number,
+): boolean {
+  return busy ? false : alpha < threshold;
+}
+
 function axisOffset(cellPx: number): string {
   const offset = -cellPx;
   // Avoid "-0px" — JS stringifies negative zero with the minus sign.

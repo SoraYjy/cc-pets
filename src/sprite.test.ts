@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  decideCursorIgnore,
   frameAt,
   offsetFor,
   resolveSheetPath,
@@ -49,6 +50,25 @@ describe("shouldWriteFrame", () => {
   it("writes when the row changes even at the same column", () => {
     // idle(0) → working(1) 切行：背景必须重写，不能只看列。
     expect(shouldWriteFrame({ row: 0, col: 1 }, { row: 1, col: 1 })).toBe(true);
+  });
+});
+
+describe("decideCursorIgnore", () => {
+  // 验收修复「可点击区域大于形象」：busy 恒 false 是手势安全钉——按下/
+  // 拖拽中途翻穿透会吃掉 mouseup / 丢窗口。
+  it("pins non-ignore while a pointer gesture is busy, regardless of alpha", () => {
+    expect(decideCursorIgnore(0, true, 16)).toBe(false);
+    expect(decideCursorIgnore(255, true, 16)).toBe(false);
+  });
+
+  it("ignores the mouse below the alpha threshold", () => {
+    expect(decideCursorIgnore(0, false, 16)).toBe(true);
+    expect(decideCursorIgnore(15, false, 16)).toBe(true);
+  });
+
+  it("keeps the clickable cat at or above the threshold", () => {
+    expect(decideCursorIgnore(16, false, 16)).toBe(false);
+    expect(decideCursorIgnore(255, false, 16)).toBe(false);
   });
 });
 
