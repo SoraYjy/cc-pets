@@ -107,6 +107,53 @@ pub fn parse_jsonl_line(raw: &str) -> LineEvent {
     }
 }
 
+/// 从一条 transcript jsonl 行提取「当前活动」摘要（v1.3 Task 1）：assistant
+/// 行（`isSidechain != true`，子代理行不算主会话活动）`message.content` 中
+/// 首个 `type=="tool_use"` 块 → `"工具名: 参数摘要"`。参数取 input 中按
+/// `command > file_path > description > pattern > url > query` 优先级首个
+/// 存在且非空的字符串字段；全无 → 仅工具名。brief 连续空白折叠为单空格
+/// （单行化）；拼接结果超 60 字符截断到 60 字符加 `…`。无 tool_use / 行型
+/// 不符 → None。宽松解析，绝不 panic；单行化后为空（如 name 缺失且无参数
+/// 的畸形块）→ None，不产空活动。
+pub fn extract_activity(row: &serde_json::Value) -> Option<String> {
+    if row.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    if row.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let content = row.get("message")?.get("content")?.as_array()?;
+    let block = content
+        .iter()
+        .find(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))?;
+    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+    const PARAM_FIELDS: [&str; 6] = ["command", "file_path", "description", "pattern", "url", "query"];
+    let brief = block
+        .get("input")
+        .and_then(|input| {
+            PARAM_FIELDS.iter().find_map(|f| {
+                input
+                    .get(*f)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+            })
+        });
+    let text = match brief {
+        Some(b) => format!("{}: {}", name, b),
+        None => name.to_string(),
+    };
+    // 单行化：连续空白（含换行/制表）折叠为一个空格
+    let single = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single.is_empty() {
+        return None;
+    }
+    if single.chars().count() > 60 {
+        Some(format!("{}…", truncate_chars(&single, 60)))
+    } else {
+        Some(single)
+    }
+}
+
 /// transcript 增量尾读的分帧器：跨 feed 缓冲残行，按 `\n` 切出完整行。
 ///
 /// `offset` 由调用方按 chunk 字节长度推进，[`Tailer::feed`] 自己不动它。
@@ -192,6 +239,11 @@ pub fn run_poller<E>(
         std::collections::HashMap::new();
     // sid → 最近一次 end_turn 文本（turn_duration 行到达时取出作摘要）。
     let mut last_end_turn: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // sid → 最近一次工具活动摘要（v1.3 Task 1）：尾读到含 tool_use 的
+    // assistant 行时更新；回合结束（idle）不清空——保留最后值。无值的
+    // sid 不在 map（snapshot 写 null）。量级：每条 ≤61 字符 × sid 数。
+    let mut last_activity: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut prev_working: Option<bool> = None;
 
@@ -308,6 +360,15 @@ pub fn run_poller<E>(
             slot.1 += got as u64;
 
             for line in lines {
+                // v1.3 Task 1：活动提取。与 parse_jsonl_line 各自解析一次
+                // （extract_activity 以 Value 为入参，纯函数契约）；行小、
+                // 2s tick 量级，双解析成本可忽略。有新 tool_use 才更新，
+                // 只 insert 不清空 → idle 后保留最后值。
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if let Some(a) = extract_activity(&v) {
+                        last_activity.insert(sid.clone(), a);
+                    }
+                }
                 match parse_jsonl_line(&line) {
                     LineEvent::EndTurnText(s) => {
                         last_end_turn.insert(sid.clone(), s);
@@ -353,8 +414,9 @@ pub fn run_poller<E>(
         // unix 上仅剩「注册表重写瞬间」的窄窗，在非 unix 平台承担原职责。）
 
         // ---- 5. sessions-snapshot（v1.2 Task 4）：每 tick 末尾对 alive 列表
-        // 整体 emit——右键猫呼出的会话面板数据源。payload 小（N×5 字段），
+        // 整体 emit——右键猫呼出的会话面板数据源。payload 小（N×6 字段），
         // 2s 一次可接受；不做增量/去抖，面板按 status+project 排序自渲染。
+        // v1.3 Task 1：字段扩到六项（+activity 最近工具活动）。
         // pet 自有 chat 进程（self_pids）沿用既有过滤、不进 alive——快照如实
         // 反映「对外可见的活跃 session」；行顺序即 read_dir 顺序，不保证。
         emit(
@@ -369,6 +431,11 @@ pub fn run_poller<E>(
                             "name": name,
                             "status": status,
                             "updatedAtMs": updated_at_ms,
+                            // v1.3 Task 1：最近工具活动（尾读最新一次
+                            // tool_use 的摘要）；从未观测到 → null。字段
+                            // 恒在场（不用 skip_serializing_if），前端按
+                            // 「null 不渲染」处理。
+                            "activity": last_activity.get(sid),
                         })
                     })
                     .collect::<Vec<serde_json::Value>>(),
@@ -393,6 +460,7 @@ pub fn run_poller<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_garbage_line_is_other() {
@@ -491,6 +559,161 @@ mod tests {
         // 删掉 status 字段 → 缺关键字段 → None
         let missing = r#"{"pid":123,"sessionId":"s1","cwd":"/x/y","name":"widget-ef","updatedAt":1730000000000}"#;
         assert!(parse_session_entry(missing).is_none());
+    }
+
+    // ===== v1.3 Task 1: extract_activity =====
+
+    /// 构造一条 assistant tool_use 行（sidechain=true 时加 isSidechain 标记）。
+    fn tool_use_row(name: &str, input: serde_json::Value, sidechain: bool) -> serde_json::Value {
+        let mut row = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": name, "input": input},
+                ],
+            },
+        });
+        if sidechain {
+            row["isSidechain"] = json!(true);
+        }
+        row
+    }
+
+    #[test]
+    fn test_extract_activity_priority_tools() {
+        // 简报测试清单：Bash(command) / Edit(file_path) / Read(file_path) /
+        // Grep(pattern) 各取对应参数
+        assert_eq!(
+            extract_activity(&tool_use_row("Bash", json!({"command": "npm test"}), false)),
+            Some("Bash: npm test".to_string())
+        );
+        assert_eq!(
+            extract_activity(&tool_use_row("Edit", json!({"file_path": "/x/y.rs"}), false)),
+            Some("Edit: /x/y.rs".to_string())
+        );
+        assert_eq!(
+            extract_activity(&tool_use_row("Read", json!({"file_path": "/a/b.md"}), false)),
+            Some("Read: /a/b.md".to_string())
+        );
+        assert_eq!(
+            extract_activity(&tool_use_row("Grep", json!({"pattern": "foo"}), false)),
+            Some("Grep: foo".to_string())
+        );
+        assert_eq!(
+            extract_activity(&tool_use_row("WebSearch", json!({"query": "rust serde"}), false)),
+            Some("WebSearch: rust serde".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_activity_priority_order_and_empty_skip() {
+        // command 优先于一切在场的字段
+        let row = tool_use_row(
+            "Bash",
+            json!({"command": "c", "file_path": "f", "pattern": "p"}),
+            false,
+        );
+        assert_eq!(extract_activity(&row), Some("Bash: c".to_string()));
+        // command 空串 → 跳过，取下一个在场字段 file_path
+        let row = tool_use_row("Bash", json!({"command": "", "file_path": "f"}), false);
+        assert_eq!(extract_activity(&row), Some("Bash: f".to_string()));
+        // command 非字符串 → 跳过
+        let row = tool_use_row("Bash", json!({"command": 123, "file_path": "f"}), false);
+        assert_eq!(extract_activity(&row), Some("Bash: f".to_string()));
+    }
+
+    #[test]
+    fn test_extract_activity_truncates_over_60_chars() {
+        let long = "x".repeat(80);
+        let row = tool_use_row("Bash", json!({ "command": long }), false);
+        let out = extract_activity(&row).expect("tool_use present");
+        // 整条输出截断到 60 字符 + …（合计 61），前缀保留
+        assert_eq!(out.chars().count(), 61);
+        assert!(out.starts_with("Bash: "));
+        assert!(out.ends_with('…'));
+        // 恰 60 字符（"Bash: " + 54）不截断、无省略号
+        let cmd54 = "y".repeat(54);
+        let row = tool_use_row("Bash", json!({"command": cmd54}), false);
+        let out = extract_activity(&row).expect("tool_use present");
+        assert_eq!(out.chars().count(), 60);
+        assert!(!out.ends_with('…'));
+    }
+
+    #[test]
+    fn test_extract_activity_collapses_whitespace() {
+        let row = tool_use_row(
+            "Bash",
+            json!({"command": "npm\ntest\t --filter   widget\n"}),
+            false,
+        );
+        assert_eq!(
+            extract_activity(&row),
+            Some("Bash: npm test --filter widget".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_activity_rejects_sidechain_and_non_assistant() {
+        // isSidechain=true → None
+        let row = tool_use_row("Bash", json!({"command": "c"}), true);
+        assert_eq!(extract_activity(&row), None);
+        // isSidechain=false 显式在场 → 照常提取
+        let mut row = tool_use_row("Bash", json!({"command": "c"}), false);
+        row["isSidechain"] = json!(false);
+        assert_eq!(extract_activity(&row), Some("Bash: c".to_string()));
+        // type=user（tool_result 行）→ None
+        let row = json!({"type":"user","message":{"content":[{"type":"tool_result"}]}});
+        assert_eq!(extract_activity(&row), None);
+        // system 行 → None
+        let row = json!({"type":"system","subtype":"turn_duration","sessionId":"s"});
+        assert_eq!(extract_activity(&row), None);
+    }
+
+    #[test]
+    fn test_extract_activity_none_when_no_tool_use() {
+        let row = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hello"}]},
+        });
+        assert_eq!(extract_activity(&row), None);
+        // content / message 缺失 → None
+        assert_eq!(extract_activity(&json!({"type":"assistant"})), None);
+        assert_eq!(extract_activity(&json!({"type":"assistant","message":{}})), None);
+    }
+
+    #[test]
+    fn test_extract_activity_tool_name_only() {
+        // input 空对象 → 仅工具名
+        assert_eq!(
+            extract_activity(&tool_use_row("Bash", json!({}), false)),
+            Some("Bash".to_string())
+        );
+        // 字段不在优先级清单内 → 仅工具名
+        let row = tool_use_row("Bash", json!({"path": "/x", "other": "y"}), false);
+        assert_eq!(extract_activity(&row), Some("Bash".to_string()));
+        // input 缺失 → 仅工具名
+        let row = json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}});
+        assert_eq!(extract_activity(&row), Some("Bash".to_string()));
+        // 畸形块（无 name 无参数）→ 单行化后为空 → None，不产空活动
+        let row = json!({"type":"assistant","message":{"content":[{"type":"tool_use"}]}});
+        assert_eq!(extract_activity(&row), None);
+    }
+
+    #[test]
+    fn test_extract_activity_takes_first_tool_use_block() {
+        let row = json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "先说两句"},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "/first.rs"}},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "second"}},
+            ]},
+        });
+        assert_eq!(
+            extract_activity(&row),
+            Some("Read: /first.rs".to_string())
+        );
     }
 }
 
@@ -1106,10 +1329,12 @@ mod poller_tests {
     /// v1.2 Task 4：sessions-snapshot payload 单测（复用 golden fixture 布局）。
     /// 两 session（A busy / B idle，pid=测试进程自身，spawn_poller 的
     /// self_pids 为空集 → 均入选）：每 tick 的 snapshot 必须整体携带 alive
-    /// 全部五字段（sessionId/cwd/name/status/updatedAtMs）。顺序说明：alive
-    /// 顺序即 read_dir 顺序不保证（前端按 status+project 排序显示），测试把
-    /// sessions 数组按 sessionId 排序后做全等；drain 窗口内的每一条
-    /// snapshot 都断言——缺字段/多会话/漏会话即红。
+    /// 全部六字段（sessionId/cwd/name/status/updatedAtMs/activity；两会话
+    /// 历史均无 tool_use → activity 恒 null——「字段恒在场、无值 null」的
+    /// 契约由此钉住）。顺序说明：alive 顺序即 read_dir 顺序不保证（前端按
+    /// status+project 排序显示），测试把 sessions 数组按 sessionId 排序后
+    /// 做全等；drain 窗口内的每一条 snapshot 都断言——缺字段/多会话/漏
+    /// 会话即红。
     #[test]
     fn test_sessions_snapshot_payload() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1127,6 +1352,7 @@ mod poller_tests {
                     "name": "alpha",
                     "status": "busy",
                     "updatedAtMs": now,
+                    "activity": serde_json::Value::Null,
                 },
                 {
                     "sessionId": "sid-b",
@@ -1134,6 +1360,7 @@ mod poller_tests {
                     "name": "beta",
                     "status": "idle",
                     "updatedAtMs": now,
+                    "activity": serde_json::Value::Null,
                 },
             ]
         });
@@ -1302,5 +1529,83 @@ mod poller_tests {
         );
         let snapshot = hit.expect("checked above");
         assert_eq!(snapshot.1["sessions"][0]["status"], "busy");
+    }
+
+    /// v1.3 Task 1 端到端：snapshot 的 activity 新字段。首见不重放吃掉
+    /// 历史 → 追加普通 tool_use 行 + sidechain tool_use 行（后者必须被
+    /// 忽略——两行同 chunk 顺序处理，若 sidechain 行泄漏更新，最终值会是
+    /// sidechain 的命令，精确断言即显红）→ snapshot 携带 "Bash: npm test"；
+    /// 再追加一轮 turn（end_turn 文本 + turn_duration，即 idle 信号）→
+    /// activity 保留最后值不清空。
+    #[test]
+    fn test_snapshot_activity_updated_and_retained_after_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = make_session(
+            tmp.path(),
+            std::process::id(),
+            "sid-act",
+            "act",
+            "busy",
+            now_ms(),
+            "历史回合",
+        );
+        let (rx, stop) = spawn_poller(tmp.path());
+
+        // 首扫吃掉历史（首见不重放），收干首批事件
+        thread::sleep(Duration::from_millis(300));
+        while rx.try_recv().is_ok() {}
+
+        // 追加：普通 tool_use 行 + isSidechain=true 的 tool_use 行
+        let proj = tmp
+            .path()
+            .join("projects")
+            .join(encode_cwd(&cwd))
+            .join("sid-act.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&proj).unwrap();
+        use std::io::Write as _;
+        f.write_all(
+            concat!(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"npm test"}}]}}"#,
+                "\n",
+                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sidechain cmd"}}]}}"#,
+                "\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        drop(f);
+
+        let expected = "Bash: npm test".to_string();
+        let hit = wait_for(
+            &rx,
+            |(e, v)| {
+                e == "sessions-snapshot"
+                    && v["sessions"].as_array().map(|a| a.len()) == Some(1)
+                    && v["sessions"][0]["activity"].as_str() == Some(expected.as_str())
+            },
+            Duration::from_secs(2),
+        );
+        assert!(
+            hit.is_some(),
+            "snapshot must carry the tool activity ({expected}), sidechain line ignored"
+        );
+
+        // idle：追加一轮完成（turn_duration 行到达 → turn-complete），
+        // activity 必须保留最后值
+        append_turn(tmp.path(), &cwd, "sid-act", "完成", Some(1000));
+        let hit = wait_for(
+            &rx,
+            |(e, _)| e == "turn-complete",
+            Duration::from_secs(2),
+        );
+        assert!(hit.is_some(), "idle turn must produce turn-complete");
+
+        let events = stop_and_drain(&stop, &rx);
+        assert!(
+            events.iter().any(|(e, v)| e == "sessions-snapshot"
+                && v["sessions"][0]["activity"].as_str() == Some(expected.as_str())),
+            "activity must be retained after idle, got {:?}",
+            events
+        );
     }
 }
