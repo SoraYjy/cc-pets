@@ -1,12 +1,32 @@
 import { describe, expect, it } from "vitest";
 
-import { clampDrag, grabOffset, type MonitorBounds } from "./drag";
+import { clampDrag, grabOffset, roundPhysical, type MonitorBounds } from "./drag";
 
 // 测试基准：猫窗 288×312（物理 px），显示器可见区 = 1920×1056 @ (0,24)
 // （顶部 24px 为菜单栏，即 visibleFrame 顶在 y=24）。
 const WIN_W = 288;
 const WIN_H = 312;
 const BOUNDS: MonitorBounds = { x: 0, y: 24, width: 1920, height: 1056 };
+
+describe("roundPhysical", () => {
+  // 「完全拖不动」实修钉：macOS 光标物理坐标带小数（缩放分辨率非整数
+  // scaleFactor），set_position 的 i32 参数拒收浮点——IPC 边界必须取整。
+  it("rounds fractional physical coordinates", () => {
+    expect(roundPhysical({ x: 1603.140625, y: 522.2109375 })).toEqual({
+      x: 1603,
+      y: 522,
+    });
+    expect(roundPhysical({ x: 2413.1953125, y: 2095.2421875 })).toEqual({
+      x: 2413,
+      y: 2095,
+    });
+  });
+
+  it("uses JS Math.round half-up semantics and keeps integers", () => {
+    expect(roundPhysical({ x: 100.5, y: -100.5 })).toEqual({ x: 101, y: -100 });
+    expect(roundPhysical({ x: 42, y: 0 })).toEqual({ x: 42, y: 0 });
+  });
+});
 
 describe("grabOffset", () => {
   it("test_grab_offset_delta", () => {

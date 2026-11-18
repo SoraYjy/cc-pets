@@ -24,6 +24,14 @@ export function grabOffset(cursor: Physical, origin: Physical): Physical {
   return { x: cursor.x - origin.x, y: cursor.y - origin.y };
 }
 
+// 物理坐标过 IPC 前取整（「完全拖不动」实修）：macOS 光标物理坐标是分数
+// （缩放分辨率下非整数 scaleFactor 所致），而 set_position 的 PhysicalPosition
+// 参数是 i32——浮点直传每帧都被 IPC 参数校验拒绝。取整放 IPC 边界（调用侧），
+// 纯函数层保持全精度数学可测。
+export function roundPhysical(p: Physical): Physical {
+  return { x: Math.round(p.x), y: Math.round(p.y) };
+}
+
 // 拖拽钳制（纯函数）：
 // - 窗口矩形与可见区交集两轴 ≥ margin（默认 48px，窗口永不整没）；
 // - 四边对称：越界 → 钳到「只剩 margin 可见」的那条边界；顶部允许窗口

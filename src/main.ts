@@ -9,7 +9,7 @@ import {
 } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { clampPetZoom } from "./theme";
-import { clampDrag, grabOffset, type MonitorBounds, type Physical } from "./drag";
+import { clampDrag, grabOffset, roundPhysical, type MonitorBounds, type Physical } from "./drag";
 import {
   isPermissionGranted,
   requestPermission,
@@ -1221,13 +1221,15 @@ function dragTick(): void {
         dragLastApplied.x !== target.x ||
         dragLastApplied.y !== target.y
       ) {
-        await getCurrentWindow().setPosition(new PhysicalPosition(target.x, target.y));
-        dragLastApplied = target; // 落账在成功之后：reject 不记，瞬态失败不丢帧
+        // IPC 边界取整：物理坐标传 i32，浮点直传会被参数校验整帧拒绝。
+        const rounded = roundPhysical(target);
+        await getCurrentWindow().setPosition(new PhysicalPosition(rounded.x, rounded.y));
+        dragLastApplied = rounded; // 落账在成功之后：reject 不记，瞬态失败不丢帧
         dFrameOk++;
         if (!dFirstMoveOk) {
           dFirstMoveOk = true;
           debug(
-            `drag first move ok target=(${target.x},${target.y}) hidden=${document.hidden}`,
+            `drag first move ok target=(${rounded.x},${rounded.y}) hidden=${document.hidden}`,
           );
         }
       }
