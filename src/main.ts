@@ -411,6 +411,9 @@ interface SessionRow {
   name: string;
   status: string;
   updatedAtMs: number;
+  // v1.3 Task 1：最近工具活动，恒在场、无值 null（watcher.rs 同款契约，
+  // sessions.ts 按 string|null 消费——本窗只转发快照，类型保持一致）。
+  activity: string | null;
 }
 
 interface SessionsSnapshotPayload {
@@ -772,9 +775,14 @@ async function positionNearPet(
           x = Math.round(petL.x - width - CHAT_GAP_PX);
         }
       }
-      // final clamp into the monitor; without a monitor skip it entirely
+      // final clamp into the monitor; without a monitor skip it entirely.
+      // y 下界用可见区顶（workArea = 菜单栏下缘，物理 → 逻辑换算同 monL），
+      // 不用完整 bounds 顶：侧向 fallback 后 headTop<0 可达，钳回完整顶会
+      // 让气泡顶条压进菜单栏区（~24 逻辑 px）。字段语义与 drag.ts（v1.3
+      // Task 2）的 workArea 用法一致。水平与底部钳制不动（dock 行为未变）。
+      const workAreaTopLogical = mon.workArea.position.y / sf;
       x = Math.min(Math.max(x, monL.x), monL.x + monL.w - width);
-      y = Math.min(Math.max(y, monL.y), monL.y + monL.h - height);
+      y = Math.min(Math.max(y, workAreaTopLogical), monL.y + monL.h - height);
     }
   }
   return { x, y };
