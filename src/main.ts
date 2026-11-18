@@ -4,6 +4,7 @@ import {
   currentMonitor,
   cursorPosition,
   getCurrentWindow,
+  LogicalPosition,
   PhysicalPosition,
   type Monitor,
 } from "@tauri-apps/api/window";
@@ -803,6 +804,28 @@ async function positionNearPet(
   return { x, y };
 }
 
+// Re-anchor an existing bubble/panel window to the cat's current position
+// before showing it. positionNearPet runs only at creation time otherwise —
+// with the hide/show lifecycle the window outlives the cat's location, and a
+// dragged cat would keep popping the panel at its creation-time spot (the
+// "fixed position" acceptance report). Geometry (above head → right → left
+// side flip, on-screen clamps) is all inside positionNearPet.
+async function placeWindowNearPet(
+  win: WebviewWindow,
+  width: number,
+  height: number,
+  label: string,
+): Promise<void> {
+  const { x, y } = await positionNearPet(width, height);
+  if (x === undefined || y === undefined) {
+    debug(`${label} reposition skipped (probe failed)`, 5000);
+    return;
+  }
+  await win
+    .setPosition(new LogicalPosition(x, y))
+    .catch((err: unknown) => showDebug(`${label} reposition failed: ${errorText(err)}`));
+}
+
 async function openChatWindow(): Promise<void> {
   debug("opening chat window…");
 
@@ -815,9 +838,11 @@ async function openChatWindow(): Promise<void> {
   }
   if (existing) {
     // Serialized-chain re-entry (click raced a create): the bubble exists —
-    // reveal + focus it instead of creating a duplicate label.
+    // re-anchor to the cat's current position, then reveal + focus instead of
+    // creating a duplicate label.
     debug("chat exists → show/focus", 5000);
     markBubbleShown(); // v1.2 Task 3: 气泡已上屏
+    await placeWindowNearPet(existing, CHAT_WIDTH, CHAT_HEIGHT, "chat");
     await existing
       .unminimize()
       .catch((err: unknown) => showDebug(`chat unminimize failed: ${errorText(err)}`));
@@ -919,6 +944,7 @@ async function onClickPet(): Promise<void> {
     }
     debug("chat hidden → show", 5000);
     markBubbleShown(); // v1.2 Task 3: 气泡已上屏
+    await placeWindowNearPet(existing, CHAT_WIDTH, CHAT_HEIGHT, "chat");
     await existing
       .unminimize()
       .catch((err: unknown) => showDebug(`chat unminimize failed: ${errorText(err)}`));
@@ -965,6 +991,7 @@ async function revealChatForNotification(): Promise<void> {
   if (visible) return; // 边界①：气泡已显示 → no-op
   debug("notification-focus reveal", 5000);
   markBubbleShown();
+  await placeWindowNearPet(existing, CHAT_WIDTH, CHAT_HEIGHT, "chat");
   await existing
     .unminimize()
     .catch((err: unknown) => showDebug(`chat unminimize failed: ${errorText(err)}`));
@@ -1048,6 +1075,7 @@ async function toggleSessionsWindow(): Promise<void> {
       return;
     }
     debug("sessions hidden → show", 5000);
+    await placeWindowNearPet(existing, SESSIONS_WIDTH, SESSIONS_HEIGHT, "sessions");
     await existing
       .unminimize()
       .catch((err: unknown) => showDebug(`sessions unminimize failed: ${errorText(err)}`));
