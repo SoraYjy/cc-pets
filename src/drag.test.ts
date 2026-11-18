@@ -77,6 +77,31 @@ describe("clampDrag", () => {
     expect(Math.min(y + WIN_H, BOUNDS.y + BOUNDS.height) - Math.max(y, BOUNDS.y)).toBe(48);
   });
 
+  it("test_clamp_drag_head_aware_ymin_pins_cat_head_at_visible_top", () => {
+    // 「卡住/猫没了」实修钉：猫锚窗底，「窗口留 margin」口径会把猫身几乎整只
+    // 滑进菜单栏（实测仅剩 ~9px 脚尖）。yMin = 可见区顶 − 猫头窗口内偏移时，
+    // 顶界以猫头为准：猫头贴线即停，永不越线。
+    // 基准：winH=312 逻辑，猫头偏移 159 逻辑（zoom 1.0：104 + 208×0.5 的一半
+    // 处取整口径不影响断言，直接用调用侧换算后的物理值 318、可见区顶 66）。
+    const yMin = 66 - 318; // -252 物理px：窗 y=-252 时猫头恰在可见区顶
+    expect(clampDrag({ x: 500, y: -1000 }, WIN_W, WIN_H, BOUNDS, 48, yMin)).toEqual({
+      x: 500,
+      y: -252,
+    });
+    // 窗位高于猫头线 → 钳回；低于 → 不钳（正常屏内拖拽零影响）
+    expect(clampDrag({ x: 500, y: -300 }, WIN_W, WIN_H, BOUNDS, 48, yMin).y).toBe(-252);
+    expect(clampDrag({ x: 500, y: -100 }, WIN_W, WIN_H, BOUNDS, 48, yMin).y).toBe(-100);
+  });
+
+  it("test_clamp_drag_ymin_leaves_x_and_bottom_intact", () => {
+    // yMin 只接管顶界：左右/底部 48px 口径不受影响
+    const r = clampDrag({ x: 1900, y: -1000 }, WIN_W, WIN_H, BOUNDS, 48, -252);
+    expect(r.x).toBe(1872); // 右侧仍钳 48px
+    expect(r.y).toBe(-252); // 顶部用 yMin
+    const b = clampDrag({ x: 500, y: 1200 }, WIN_W, WIN_H, BOUNDS, 48, -252);
+    expect(b.y).toBe(1032); // 底部仍钳 48px
+  });
+
   it("test_clamp_drag_left_to_48px_visible", () => {
     // 探出 200px 时交集仍有 88px（≥48）→ 合法，原样保留
     expect(clampDrag({ x: -200, y: 400 }, WIN_W, WIN_H, BOUNDS).x).toBe(-200);

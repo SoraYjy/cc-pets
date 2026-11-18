@@ -1142,6 +1142,10 @@ let dragGrabOffset: Physical | null = null; // mousedown 时一次性（物理 p
 // 是它的 scaleFactor 倍——钳制输入必须同单位，开拖时用 outerSize() 实测。
 let dragWinSize: { width: number; height: number } | null = null;
 let dragBounds: MonitorBounds | null = null; // mousedown 取一次，拖拽中定期刷新
+// 猫头基准钳制线用：精灵视觉头顶在窗口内的物理偏移 =
+// (ELEM_Y + CELL_H × (1 − zoom)) × sf——与气泡定位 headTop 同一条公式
+// （cell 顶即「头」锚点）。可见区刷新时随 mon.scaleFactor 一起更新。
+let dragHeadOffsetPx = 0;
 let lastBoundsRefreshAt = 0;
 let dragRafId: number | null = null;
 // 帧去重（v1.2 Task 2 精灵帧去重同思路）：按住不动时目标位置不变，
@@ -1206,6 +1210,9 @@ function dragTick(): void {
       const mon = await currentMonitor().catch(() => null);
       if (dragging) {
         dragBounds = monitorVisibleBounds(mon);
+        // 猫头偏移随当前屏 sf 走；mon 探测失败时 Retina 2x 兜底（该分支
+        // 本就退化成巨框不钳，偏移误差无实际影响）。
+        dragHeadOffsetPx = (ELEM_Y + CELL_H * (1 - clampPetZoom(petZoom))) * (mon?.scaleFactor ?? 2);
         if (!dBoundsLogged) {
           dBoundsLogged = true;
           const raw = mon
@@ -1215,7 +1222,7 @@ function dragTick(): void {
                   : "none"
               }`
             : "monitor=null";
-          debug(`drag bounds ${raw} -> clamp box=(${dragBounds.x},${dragBounds.y},${dragBounds.width},${dragBounds.height})`);
+          debug(`drag bounds ${raw} -> clamp box=(${dragBounds.x},${dragBounds.y},${dragBounds.width},${dragBounds.height}) headOff=${dragHeadOffsetPx}`);
         }
       }
     }
@@ -1230,6 +1237,9 @@ function dragTick(): void {
         dragWinSize.height,
         dragBounds,
         DRAG_VISIBLE_MARGIN_PX,
+        // 顶界换猫头基准：可见区顶 − 猫头窗口内偏移 → 猫头贴菜单栏下缘即停，
+        // 猫身永不满滑进菜单栏（窗口留边口径会吃掉整只猫，验收实测）。
+        dragBounds.y - dragHeadOffsetPx,
       );
       if (
         !dragLastApplied ||
