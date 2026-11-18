@@ -9,7 +9,7 @@ import {
 } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { clampPetZoom } from "./theme";
-import { clampDrag, grabOffset, roundPhysical, type MonitorBounds, type Physical } from "./drag";
+import { clampDrag, grabOffset, roundPhysical, splitVerticalTarget, type MonitorBounds, type Physical } from "./drag";
 import {
   isPermissionGranted,
   requestPermission,
@@ -261,6 +261,15 @@ let alphaMaskUrl: string | null = null; // sheet the mask was decoded from
 let ignoringMouse = false;
 let dragging = false; // hoisted so the hit-test probe can pin non-ignore
 let pointerPressed = false; // mousedown→mouseup 之间：轮询/命中探针禁止翻穿透
+// 精灵在窗内的上滑偏移（逻辑 px，≤0）：窗口顶被 AppKit 钳在屏幕顶
+// （setFrameTopLeftPoint → constrainFrameRect，写负 y 被无声拍回）后，剩余
+// 向上位移由精灵 element top 上移承担——猫头贴线的载体。松手保持（猫停在
+// 高处），下拉自动归零（splitVerticalTarget 的连续性），缩放重排不改它。
+let elemYShift = 0;
+
+function applySpriteShift(): void {
+  if (petEl) petEl.style.top = `${ELEM_Y + elemYShift}px`;
+}
 
 async function loadAlphaMask(url: string = `${PET_BASE}/spritesheet.png`): Promise<void> {
   try {
@@ -284,16 +293,17 @@ async function loadAlphaMask(url: string = `${PET_BASE}/spritesheet.png`): Promi
 }
 
 // Logical cursor position → alpha of the on-screen sprite pixel. The sprite
-// layer (192×208) sits offset (ELEM_X, ELEM_Y) inside the oversized window
-// and is scaled by petZoom around its bottom-center; a window point maps back
-// through the inverse transform:
+// layer (192×208) sits offset (ELEM_X, ELEM_Y + elemYShift) inside the
+// oversized window and is scaled by petZoom around its bottom-center; a
+// window point maps back through the inverse transform:
 //   sprite = origin + (window − layer offset − origin) / zoom
 // with origin = (CELL_W/2, CELL_H) in layer coords. At zoom 1.0 this reduces
 // to the legacy (x − ELEM_X, y − ELEM_Y) element mapping — pixel-identical.
+// elemYShift ≠ 0（顶部贴线的窗内上滑，见 dragTick）时命中映射随之平移。
 function alphaAt(wx: number, wy: number): number {
   if (!sheetAlpha) return 255; // no mask → treat everything as opaque
   const lx = CELL_W / 2 + (wx - ELEM_X - CELL_W / 2) / petZoom;
-  const ly = CELL_H + (wy - ELEM_Y - CELL_H) / petZoom;
+  const ly = CELL_H + (wy - (ELEM_Y + elemYShift) - CELL_H) / petZoom;
   const fx = lx / CELL_W;
   const fy = ly / CELL_H;
   if (fx < 0 || fx >= 1 || fy < 0 || fy >= 1) return 0;
@@ -754,11 +764,12 @@ async function positionNearPet(
     // Sprite-aware vertical anchor (final-review 必修 1): the pet window is
     // oversized (288×312) and the sprite layer scales bottom-center, so the
     // visible head top is NOT the window top:
-    //   head = petTop + ELEM_Y + CELL_H × (1 − petZoom)
-    // (zoom 1.0 → head at +104, 0.5 → +208, 1.5 → +0 = the window top).
+    //   head = petTop + ELEM_Y + elemYShift + CELL_H × (1 − petZoom)
+    // (zoom 1.0 → head at +104, 0.5 → +208, 1.5 → +0 = the window top;
+    // elemYShift = 顶部贴线的窗内上滑，见 dragTick / splitVerticalTarget).
     // Bubbles/panels sit 8px above that head line; at zoom 1.5 this
     // reproduces the legacy window-top anchoring exactly.
-    const headTop = petL.y + ELEM_Y + CELL_H * (1 - clampPetZoom(petZoom));
+    const headTop = petL.y + ELEM_Y + elemYShift + CELL_H * (1 - clampPetZoom(petZoom));
     x = Math.round(petL.x + (petL.w - width) / 2);
     y = Math.round(headTop - CHAT_GAP_PX - height);
     if (mon) {
@@ -1150,6 +1161,7 @@ let dragBounds: MonitorBounds | null = null; // mousedown 取一次，拖拽中�
 // 定位 headTop 同源，「格顶留白」来自 alpha 蒙版实测（皮肤加载时算一次），
 // 换肤/缩放都会被正确折算。可见区刷新时随 mon.scaleFactor 一起更新。
 let dragHeadOffsetPx = 0;
+let dragSf = 2; // 可见区刷新时的屏 scaleFactor（split 换算用）
 // 格顶 → 该皮肤实际不透明像素的最小距离（cell 像素）；蒙版失败 → 0（退回格顶口径）
 let cellHeadGapPx = 0;
 let lastBoundsRefreshAt = 0;
@@ -1219,8 +1231,8 @@ function dragTick(): void {
         // 猫头偏移随当前屏 sf 走；mon 探测失败时 Retina 2x 兜底（该分支
         // 本就退化成巨框不钳，偏移误差无实际影响）。
         const z = clampPetZoom(petZoom);
-        dragHeadOffsetPx =
-          (ELEM_Y + CELL_H * (1 - z) + cellHeadGapPx * z) * (mon?.scaleFactor ?? 2);
+        dragSf = mon?.scaleFactor ?? 2;
+        dragHeadOffsetPx = (ELEM_Y + CELL_H * (1 - z) + cellHeadGapPx * z) * dragSf;
         if (!dBoundsLogged) {
           dBoundsLogged = true;
           const raw = mon
@@ -1239,39 +1251,51 @@ function dragTick(): void {
       if (!dragging) return;
       // 刚性拖拽不变量：origin_new = cursor_new − (cursor₀ − origin₀)，
       // 抓取点相对屏幕不动——公式是「减」，加号会让首帧瞬移 2×grabOffset。
+      // 顶界不在此钳：AppKit 对负 y 会无声拍回屏幕顶（setFrameTopLeftPoint →
+      // constrainFrameRect），「窗口顶越顶」根本不可达——传 −Inf 只保留左右/
+      // 底部 48px 口径，顶部分离给 splitVerticalTarget（精灵窗内上滑）。
       const target = clampDrag(
         { x: cursor.x - dragGrabOffset.x, y: cursor.y - dragGrabOffset.y },
         dragWinSize.width,
         dragWinSize.height,
         dragBounds,
         DRAG_VISIBLE_MARGIN_PX,
-        // 顶界换猫头基准：可见区顶 − 猫头窗口内偏移 → 猫头贴菜单栏下缘即停，
-        // 猫身永不满滑进菜单栏（窗口留边口径会吃掉整只猫，验收实测）。
-        dragBounds.y - dragHeadOffsetPx,
+        Number.NEGATIVE_INFINITY,
       );
+      // 垂直拆分：窗口顶到屏幕顶后，剩余向上位移转精灵窗内上滑，猫头贴线即停；
+      // split 输出上下行连续（head 严格 1:1 跟随光标直到贴线），无跳变。
+      const split = splitVerticalTarget(
+        target.y,
+        dragSf,
+        dragHeadOffsetPx / dragSf,
+        dragBounds.y / dragSf,
+      );
+      const shiftChanged = split.shift !== elemYShift;
       if (
+        shiftChanged ||
         !dragLastApplied ||
         dragLastApplied.x !== target.x ||
-        dragLastApplied.y !== target.y
+        dragLastApplied.y !== split.winY
       ) {
         // IPC 边界取整：物理坐标传 i32，浮点直传会被参数校验整帧拒绝。
-        const rounded = roundPhysical(target);
-        if (
-          (rounded.x !== target.x || rounded.y !== target.y || cursor.y - dragGrabOffset.y < dragBounds.y + 100) &&
-          !dClampLogged
-        ) {
+        const rounded = roundPhysical({ x: target.x, y: split.winY });
+        if (!dClampLogged && (rounded.y !== split.winY || rounded.y <= 0)) {
           dClampLogged = true;
           debug(
-            `drag clamp zone: cursor=(${cursor.x},${cursor.y}) rawTarget=(${target.x},${target.y}) applied=(${rounded.x},${rounded.y})`,
+            `drag top zone: cursor=(${cursor.x},${cursor.y}) rawY=${target.y} winY=${rounded.y} shift=${split.shift}`,
           );
         }
         await getCurrentWindow().setPosition(new PhysicalPosition(rounded.x, rounded.y));
         dragLastApplied = rounded; // 落账在成功之后：reject 不记，瞬态失败不丢帧
+        if (shiftChanged) {
+          elemYShift = split.shift;
+          applySpriteShift(); // 精灵窗内上滑/复位（命中映射 alphaAt 读同一偏移）
+        }
         dFrameOk++;
         if (!dFirstMoveOk) {
           dFirstMoveOk = true;
           debug(
-            `drag first move ok target=(${rounded.x},${rounded.y}) hidden=${document.hidden}`,
+            `drag first move ok target=(${rounded.x},${rounded.y}) shift=${elemYShift} hidden=${document.hidden}`,
           );
         }
       }

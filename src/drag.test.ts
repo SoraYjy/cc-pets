@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { clampDrag, grabOffset, roundPhysical, type MonitorBounds } from "./drag";
+import { clampDrag, grabOffset, roundPhysical, splitVerticalTarget, type MonitorBounds } from "./drag";
 
 // 测试基准：猫窗 288×312（物理 px），显示器可见区 = 1920×1056 @ (0,24)
 // （顶部 24px 为菜单栏，即 visibleFrame 顶在 y=24）。
@@ -50,6 +50,55 @@ describe("grabOffset", () => {
     const origin = { x: 2000, y: 1000 };
     expect(grabOffset(cursor, origin)).toEqual({ x: 600, y: 500 });
     expect(grabOffset({ x: 0, y: 0 }, { x: 0, y: 0 })).toEqual({ x: 0, y: 0 });
+  });
+});
+
+describe("splitVerticalTarget", () => {
+  // 「贴不到顶」终修钉：tao set_position 落在 setFrameTopLeftPoint，AppKit
+  // constrainFrameRect 把负 y 无声拍回屏幕顶——窗口只能 ≥0，剩余向上位移
+  // 由精灵窗内上滑（shift ≤ 0）承担。基准：sf=2、K=173.45（zoom 0.85 实测）、
+  // 猫头线 33 逻辑（workArea.y=66 物理）。
+  const SF = 2;
+  const K = 173.45;
+  const LINE = 33;
+
+  it("keeps 1:1 cursor tracking while the window is fully on-screen", () => {
+    const { winY, shift } = splitVerticalTarget(500, SF, K, LINE);
+    expect(winY).toBe(500);
+    expect(shift).toBe(0);
+    // head = winY/sf + K + shift = 250 + 173.45
+  });
+
+  it("takes over with a sprite shift once the window top pins at the screen top", () => {
+    // 语义：head = max(rawY/sf + K, LINE)；winY = max(rawY, 0)；
+    // shift = min(0, head − K)（head 严格 1:1 跟光标，贴线即停）。
+    // rawY=-140 物理（=-70 逻辑）：desired head=103.45>33 未贴线，
+    // 窗口钉 0，shift=-70.45 → head=0+K-70.45=103.45=desired ✓
+    const near = splitVerticalTarget(-140, SF, K, LINE);
+    expect(near.winY).toBe(0);
+    expect(near.shift).toBeCloseTo(103.45 - K, 2);
+    // 猛推到头：desired<线 → 钳在线上，shift=LINE-K=-140.45
+    const pinned = splitVerticalTarget(-1000, SF, K, LINE);
+    expect(pinned.winY).toBe(0);
+    expect(pinned.shift).toBeCloseTo(LINE - K, 2);
+    // 连续性：rawY 恰在贴线临界 ((LINE-K)×sf) → shift=LINE-K
+    const edge = splitVerticalTarget((LINE - K) * SF, SF, K, LINE);
+    expect(edge.shift).toBeCloseTo(LINE - K, 2);
+  });
+
+  it("returns shift to zero smoothly when dragging back down", () => {
+    // 从贴线处下拖：desired 回升 → shift 向 0 收敛、winY 仍 0（rawY<0）；
+    // rawY=-60 → desired=143.45>33 → shift=143.45-K=-30，head 连续
+    const back = splitVerticalTarget(-60, SF, K, LINE);
+    expect(back.winY).toBe(0);
+    expect(back.shift).toBeCloseTo(-30, 2);
+    // rawY 过 0 → shift=0、窗口接管，head 连续（K 在两侧一致）
+    const over = splitVerticalTarget(10, SF, K, LINE);
+    expect(over.winY).toBe(10);
+    expect(over.shift).toBe(0);
+    const atZero = splitVerticalTarget(0, SF, K, LINE);
+    expect(atZero.winY).toBe(0);
+    expect(atZero.shift).toBe(0);
   });
 });
 

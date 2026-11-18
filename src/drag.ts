@@ -32,6 +32,27 @@ export function roundPhysical(p: Physical): Physical {
   return { x: Math.round(p.x), y: Math.round(p.y) };
 }
 
+// 垂直目标拆分（「贴不到顶」终修）：NSWindow.setFrameTopLeftPoint（tao
+// set_position 的落点）会过 AppKit constrainFrameRect:toScreen:——窗口顶边
+// 永远被钳在屏幕顶之下，setPosition 写负 y 会被无声拍回。因此窗口 y 只能
+// ≥ 0；剩余向上位移改由精灵在窗内上滑（elemYShift ≤ 0，元素 top 减小）
+// 承担，视觉连续（窗口透明）。数学（逻辑 px）：
+//   head = winY + K + shift，K = shift=0 时猫头窗口内偏移（含缩放/留白）
+//   winY = max(rawY, 0)；shift = min(0, clampedHead − K)，head 不低于猫头线
+// 上下行均连续无跳变：head 严格 1:1 跟随光标，直到贴线。
+export function splitVerticalTarget(
+  rawY: number, // 光标反推的窗口目标 y（物理 px，可负）
+  sf: number, // 当前屏 scaleFactor
+  kLogical: number, // shift=0 时的猫头窗口内偏移（逻辑 px）
+  headLineLogical: number, // 猫头钳制线（逻辑 px，菜单栏下缘）
+): { winY: number; shift: number } {
+  const desiredHead = rawY / sf + kLogical;
+  const clampedHead = Math.max(desiredHead, headLineLogical);
+  const winY = Math.max(rawY, 0);
+  const shift = Math.min(0, clampedHead - kLogical);
+  return { winY, shift };
+}
+
 // 拖拽钳制（纯函数）：
 // - 窗口矩形与可见区交集在水平/底部 ≥ margin（默认 48px，窗口永不整没）；
 // - 顶部默认与左右同语义（窗口可悬挂越出直到只剩 margin）；但调用侧传
