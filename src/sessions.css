@@ -66,11 +66,11 @@ body {
   border-radius: 3px;
 }
 
-/* One row = status dot + project/session names + relative activity time. */
+/* One row = main line (status dot + project/session names + relative
+   activity time) + optional tool-activity sub-line (v1.3 Task 3). */
 .row {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
   padding: 7px 8px;
   border-radius: 8px;
   margin-bottom: 2px;
@@ -78,6 +78,13 @@ body {
 
 .row:hover {
   background: rgba(255, 255, 255, 0.05);
+}
+
+/* The original single line — layout untouched, just nested one level down. */
+.main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* Status dot: busy = green breathing, idle = static gray. */
@@ -139,6 +146,23 @@ body {
   font-size: 10.5px;
   opacity: 0.55;
   font-variant-numeric: tabular-nums;
+}
+
+/* Tool-activity sub-line: gray small text, single-line ellipsis, indented
+   to align with .meta (row padding 8px + dot 8px + gap 8px). Base (idle) is
+   dim gray; busy runs brighter with a green tint echoing its breathing dot.
+   Text is transcript-derived — injected via textContent only, never HTML. */
+.activity {
+  padding: 3px 0 0 16px;
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: rgba(207, 214, 232, 0.4);
+}
+
+.activity.busy {
+  color: rgba(74, 222, 128, 0.8);
 }
 
 .empty {

@@ -1,6 +1,7 @@
 // Sessions panel (v1.2 Task 4): pure display of the watcher's
 // sessions-snapshot stream — one row per live Claude Code session (status
-// dot + project + session name + relative activity time). No input. Closes
+// dot + project + session name + relative activity time, plus the latest
+// tool activity as a sub-line since v1.3 Task 1). No input. Closes
 // via ×/Esc and light-dismiss (失焦即收, acceptance-fix-14 — same hide
 // lifecycle and arming scheme as the chat bubble) and is toggled by
 // right-clicking the pet (main.ts).
@@ -11,13 +12,17 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { projectOf } from "./format";
 
 // Same wire shape watcher.rs emits (the pet window re-emits its stored copy
-// as a creation catch-up with the identical shape).
+// as a creation catch-up with the identical shape). `activity` (v1.3 Task 1)
+// is the latest tool-use line extracted from the transcript, always present
+// on the wire — null when the session has none yet (e.g. started before the
+// app did, no turn written since).
 interface SessionRow {
   sessionId: string;
   cwd: string;
   name: string;
   status: string;
   updatedAtMs: number;
+  activity: string | null;
 }
 
 interface SessionsSnapshotPayload {
@@ -71,6 +76,8 @@ function render(): void {
     // Names/cwd come from the session registry files (external data) —
     // built via createElement/textContent only, no innerHTML anywhere.
     el.title = `${row.name} · ${row.cwd}`;
+    const main = document.createElement("div");
+    main.className = "main";
     const dot = document.createElement("span");
     dot.className = `dot ${row.status === "busy" ? "busy" : "idle"}`;
     const meta = document.createElement("div");
@@ -85,7 +92,17 @@ function render(): void {
     const ago = document.createElement("span");
     ago.className = "ago";
     ago.textContent = relativeAge(row.updatedAtMs);
-    el.append(dot, meta, ago);
+    main.append(dot, meta, ago);
+    el.append(main);
+    // v1.3 Task 3: activity sub-line under the main row. Text comes from
+    // the transcript (external data) — textContent only. null → no line.
+    if (row.activity !== null) {
+      const act = document.createElement("div");
+      act.className = `activity ${row.status === "busy" ? "busy" : "idle"}`;
+      act.title = row.activity; // full text — the line itself is ellipsized
+      act.textContent = row.activity;
+      el.append(act);
+    }
     listEl.appendChild(el);
   }
 }
