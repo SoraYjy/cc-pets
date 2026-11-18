@@ -85,10 +85,11 @@ let bubbleShownSinceNotification = true;
 
 // ===== Debug line =====
 
-// Diagnostic facility (acceptance fix): failure paths that used to be
-// console-only — or swallowed entirely — land on a single red line under the
-// pet (#debug-line in index.html), so chat-window / notification triage works
-// without devtools. Successes flash through too and clear themselves.
+// Diagnostic facility: every breadcrumb/failure lands in the persisted
+// debug.log (append_debug). The v1.1-era on-screen red line under the pet is
+// gone (no #debug-line element) — it read as part of the pet UI and detached
+// from the sprite when the window-top slide shipped — so setDebugLine is a
+// guarded no-op kept for call-site stability.
 let debugClearTimer: ReturnType<typeof setTimeout> | undefined;
 
 function setDebugLine(msg: string, clearAfterMs?: number): void {

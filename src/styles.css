@@ -16,19 +16,6 @@ body {
   left: 0;
 }
 
-#debug-line {
-  /* Diagnostic line (see showDebug in main.ts). Round-1 placement (top:216px)
-     sat OUTSIDE the 208px pet window and was never visible — pinned to the
-     window bottom instead so it is always on-screen. */
-  position: fixed;
-  bottom: 4px;
-  left: 4px;
-  right: 4px;
-  z-index: 9999;
-  font-size: 9px;
-  line-height: 1.2;
-  max-height: 40px;
-  overflow: hidden;
-  color: #ff6b6b;
-  text-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
-}
+/* Diagnostics: the on-screen red line was removed (it read as part of the
+   pet UI and detached visually when the sprite slides inside the window);
+   the durable channel is debug.log via append_debug. */
