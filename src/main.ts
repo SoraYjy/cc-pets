@@ -1160,6 +1160,8 @@ let gMaxDist = 0; // 本手势按下点→当前点最大位移（逻辑 px）
 let dFirstMoveOk = false; // 首次 setPosition 成功（每拖拽记一次）
 let dFrameOk = 0;
 let dFrameFail = 0;
+let dBoundsLogged = false; // 可见区实测（每拖拽记一次）
+let dClampLogged = false; // 钳制介入点（每拖拽记一次）
 
 // currentMonitor() → 拖拽钳制用的可见区矩形（物理 px）。主路 workArea =
 // NSScreen.visibleFrame（菜单栏下缘为顶；tauri-runtime-wry 的 MonitorExt
@@ -1202,7 +1204,20 @@ function dragTick(): void {
     if (Date.now() - lastBoundsRefreshAt >= MONITOR_BOUNDS_REFRESH_MS) {
       lastBoundsRefreshAt = Date.now();
       const mon = await currentMonitor().catch(() => null);
-      if (dragging) dragBounds = monitorVisibleBounds(mon);
+      if (dragging) {
+        dragBounds = monitorVisibleBounds(mon);
+        if (!dBoundsLogged) {
+          dBoundsLogged = true;
+          const raw = mon
+            ? `pos=(${mon.position.x},${mon.position.y}) size=${mon.size.width}x${mon.size.height} sf=${mon.scaleFactor} workArea=${
+                mon.workArea
+                  ? `(${mon.workArea.position.x},${mon.workArea.position.y}) ${mon.workArea.size.width}x${mon.workArea.size.height}`
+                  : "none"
+              }`
+            : "monitor=null";
+          debug(`drag bounds ${raw} -> clamp box=(${dragBounds.x},${dragBounds.y},${dragBounds.width},${dragBounds.height})`);
+        }
+      }
     }
     if (dragGrabOffset && dragWinSize && dragBounds) {
       const cursor = await cursorPosition();
@@ -1223,6 +1238,15 @@ function dragTick(): void {
       ) {
         // IPC 边界取整：物理坐标传 i32，浮点直传会被参数校验整帧拒绝。
         const rounded = roundPhysical(target);
+        if (
+          (rounded.x !== target.x || rounded.y !== target.y || cursor.y - dragGrabOffset.y < dragBounds.y + 100) &&
+          !dClampLogged
+        ) {
+          dClampLogged = true;
+          debug(
+            `drag clamp zone: cursor=(${cursor.x},${cursor.y}) rawTarget=(${target.x},${target.y}) applied=(${rounded.x},${rounded.y})`,
+          );
+        }
         await getCurrentWindow().setPosition(new PhysicalPosition(rounded.x, rounded.y));
         dragLastApplied = rounded; // 落账在成功之后：reject 不记，瞬态失败不丢帧
         dFrameOk++;
@@ -1278,6 +1302,8 @@ function beginSelfDrawnDrag(): void {
     dFirstMoveOk = false;
     dFrameOk = 0;
     dFrameFail = 0;
+    dBoundsLogged = false;
+    dClampLogged = false;
     debug(
       `drag grab ok d=(${dragGrabOffset.x},${dragGrabOffset.y}) win=${size.width}x${size.height}`,
     );
@@ -1294,7 +1320,11 @@ function beginSelfDrawnDrag(): void {
 }
 
 function endSelfDrawnDrag(reason: string = "mouseup"): void {
-  debug(`drag end (${reason}) ok=${dFrameOk} fail=${dFrameFail}`);
+  debug(
+    `drag end (${reason}) ok=${dFrameOk} fail=${dFrameFail} last=${
+      dragLastApplied ? `(${dragLastApplied.x},${dragLastApplied.y})` : "none"
+    }`,
+  );
   dragging = false;
   dragGrabOffset = null;
   dragWinSize = null;
