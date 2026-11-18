@@ -32,25 +32,29 @@ export function roundPhysical(p: Physical): Physical {
   return { x: Math.round(p.x), y: Math.round(p.y) };
 }
 
-// 垂直目标拆分（「贴不到顶」终修）：NSWindow.setFrameTopLeftPoint（tao
-// set_position 的落点）会过 AppKit constrainFrameRect:toScreen:——窗口顶边
-// 永远被钳在屏幕顶之下，setPosition 写负 y 会被无声拍回。因此窗口 y 只能
-// ≥ 0；剩余向上位移改由精灵在窗内上滑（elemYShift ≤ 0，元素 top 减小）
-// 承担，视觉连续（窗口透明）。数学（逻辑 px）：
-//   head = winY + K + shift，K = shift=0 时猫头窗口内偏移（含缩放/留白）
-//   winY = max(rawY, 0)；shift = min(0, clampedHead − K)，head 不低于猫头线
-// 上下行均连续无跳变：head 严格 1:1 跟随光标，直到贴线。
+// 垂直目标拆分（「贴不到顶」终修 + 「重抓跳变」实修）：NSWindow
+// .setFrameTopLeftPoint（tao set_position 的落点）会过 constrainFrameRect:
+// toScreen:——窗口顶边被无声钳在屏幕顶，负 y 不可达。因此窗口 y ≥ 0，剩余
+// 向上位移由精灵窗内上滑（shift ≤ 0）承担。
+// 增量式（重抓零跳变）：头以「抓取瞬间的头位置」为基准跟随光标增量，
+//   head = max(head₀ + dy, line)，dy = 光标纵向位移（逻辑 px）
+//   winY = max(win₀ + dy, 0)，shift = head − winY − K
+// 重抓瞬间 dy=0 → winY/win₀、shift/head₀−win₀−K 原值返回，位置连续；
+// 下行时窗口先承接全部位移（shift 冻结在初值），贴顶后 shift 才加深。
 export function splitVerticalTarget(
-  rawY: number, // 光标反推的窗口目标 y（物理 px，可负）
-  sf: number, // 当前屏 scaleFactor
+  cursorY: number, // 当前光标 y（物理 px）
+  cursor0Y: number, // 抓取瞬间光标 y（物理 px）
+  win0Y: number, // 抓取瞬间窗口 y（物理 px，≥0）
+  sf: number,
   kLogical: number, // shift=0 时的猫头窗口内偏移（逻辑 px）
+  head0Logical: number, // 抓取瞬间猫头全局位置（逻辑 px）
   headLineLogical: number, // 猫头钳制线（逻辑 px，菜单栏下缘）
 ): { winY: number; shift: number } {
-  const desiredHead = rawY / sf + kLogical;
-  const clampedHead = Math.max(desiredHead, headLineLogical);
-  const winY = Math.max(rawY, 0);
-  const shift = Math.min(0, clampedHead - kLogical);
-  return { winY, shift };
+  const dy = (cursorY - cursor0Y) / sf;
+  const head = Math.max(head0Logical + dy, headLineLogical);
+  const winYLogical = Math.max(win0Y / sf + dy, 0);
+  const shift = head - winYLogical - kLogical;
+  return { winY: winYLogical * sf, shift };
 }
 
 // 拖拽钳制（纯函数）：

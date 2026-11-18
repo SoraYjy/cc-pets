@@ -54,51 +54,57 @@ describe("grabOffset", () => {
 });
 
 describe("splitVerticalTarget", () => {
-  // 「贴不到顶」终修钉：tao set_position 落在 setFrameTopLeftPoint，AppKit
-  // constrainFrameRect 把负 y 无声拍回屏幕顶——窗口只能 ≥0，剩余向上位移
-  // 由精灵窗内上滑（shift ≤ 0）承担。基准：sf=2、K=173.45（zoom 0.85 实测）、
-  // 猫头线 33 逻辑（workArea.y=66 物理）。
+  // 「贴不到顶」+「重抓跳变」双修钉：tao set_position 落在
+  // setFrameTopLeftPoint，AppKit constrainFrameRect 把负 y 无声拍回屏幕顶
+  // ——窗口只能 ≥0，剩余向上位移由精灵窗内上滑（shift ≤ 0）承担。
+  // 增量式：head = max(head₀+dy, line)，winY = max(win₀+dy, 0)，
+  // shift = head − winY − K——重抓瞬间（dy=0）原值返回，零跳变。
+  // 基准：sf=2、K=173.45（zoom 0.85 实测）、猫头线 33 逻辑。
   const SF = 2;
   const K = 173.45;
   const LINE = 33;
 
-  it("keeps 1:1 cursor tracking while the window is fully on-screen", () => {
-    const { winY, shift } = splitVerticalTarget(500, SF, K, LINE);
-    expect(winY).toBe(500);
-    expect(shift).toBe(0);
-    // head = winY/sf + K + shift = 250 + 173.45
+  it("returns the exact current position on re-grab (dy=0) — zero jump", () => {
+    // 停在高位：win₀=0、shift₀=LINE-K=-140.45（head₀=33）。重抓瞬间必须
+    // 原值返回，不得像旧绝对式那样把 shift 归零重算（猫瞬移回老钳制位）。
+    const head0 = LINE;
+    const r = splitVerticalTarget(300, 300, 0, SF, K, head0, LINE);
+    expect(r.winY).toBe(0);
+    expect(r.shift).toBeCloseTo(head0 - 0 - K, 2); // = LINE-K
+    // 停在屏中部：win₀=1000 物理（500 逻辑）、shift₀=0（head₀=500+K=673.45）
+    const mid = splitVerticalTarget(1100, 1100, 1000, SF, K, 673.45, LINE);
+    expect(mid.winY).toBe(1000);
+    expect(mid.shift).toBeCloseTo(0, 2);
   });
 
-  it("takes over with a sprite shift once the window top pins at the screen top", () => {
-    // 语义：head = max(rawY/sf + K, LINE)；winY = max(rawY, 0)；
-    // shift = min(0, head − K)（head 严格 1:1 跟光标，贴线即停）。
-    // rawY=-140 物理（=-70 逻辑）：desired head=103.45>33 未贴线，
-    // 窗口钉 0，shift=-70.45 → head=0+K-70.45=103.45=desired ✓
-    const near = splitVerticalTarget(-140, SF, K, LINE);
-    expect(near.winY).toBe(0);
-    expect(near.shift).toBeCloseTo(103.45 - K, 2);
-    // 猛推到头：desired<线 → 钳在线上，shift=LINE-K=-140.45
-    const pinned = splitVerticalTarget(-1000, SF, K, LINE);
-    expect(pinned.winY).toBe(0);
-    expect(pinned.shift).toBeCloseTo(LINE - K, 2);
-    // 连续性：rawY 恰在贴线临界 ((LINE-K)×sf) → shift=LINE-K
-    const edge = splitVerticalTarget((LINE - K) * SF, SF, K, LINE);
-    expect(edge.shift).toBeCloseTo(LINE - K, 2);
+  it("tracks the cursor 1:1 while the window has headroom", () => {
+    // 中部下拖 100 物理（dy=50 逻辑）：窗口跟到 550 逻辑（=1100 物理），
+    // shift 冻结在初值 0
+    const r = splitVerticalTarget(1200, 1100, 1000, SF, K, 673.45, LINE);
+    expect(r.winY).toBe(1100);
+    expect(r.shift).toBeCloseTo(0, 2);
   });
 
-  it("returns shift to zero smoothly when dragging back down", () => {
-    // 从贴线处下拖：desired 回升 → shift 向 0 收敛、winY 仍 0（rawY<0）；
-    // rawY=-60 → desired=143.45>33 → shift=143.45-K=-30，head 连续
-    const back = splitVerticalTarget(-60, SF, K, LINE);
-    expect(back.winY).toBe(0);
-    expect(back.shift).toBeCloseTo(-30, 2);
-    // rawY 过 0 → shift=0、窗口接管，head 连续（K 在两侧一致）
-    const over = splitVerticalTarget(10, SF, K, LINE);
-    expect(over.winY).toBe(10);
-    expect(over.shift).toBe(0);
-    const atZero = splitVerticalTarget(0, SF, K, LINE);
-    expect(atZero.winY).toBe(0);
-    expect(atZero.shift).toBe(0);
+  it("takes over with a deeper shift once the window pins at the screen top", () => {
+    // 从中部（win₀=500 逻辑, head₀=673.45）上推 600 物理（dy=-300）：
+    // head=373.45>33 未贴线 → winY=max(200,0)=200 逻辑（400 物理），
+    // shift 冻结 0（窗口先承接全部位移）
+    const a = splitVerticalTarget(500, 1100, 1000, SF, K, 673.45, LINE);
+    expect(a.winY).toBe(400);
+    expect(a.shift).toBeCloseTo(0, 2);
+    // 推过头：desired=-326.55<线 → 钳线；win₀ 用尽 → winY=0，shift=LINE-K
+    const b = splitVerticalTarget(-200, 1100, 1000, SF, K, 673.45, LINE);
+    expect(b.winY).toBe(0);
+    expect(b.shift).toBeCloseTo(LINE - K, 2);
+  });
+
+  it("hands motion back to the window smoothly on the way down", () => {
+    // 贴线（shift₀=LINE-K）后下拖 100 物理（=50 逻辑）：窗口先伸出去 50，
+    // shift 冻结——head = 0+50/2+K+(LINE-K) = 25+LINE ✓ 连续
+    const r = splitVerticalTarget(100, 0, 0, SF, K, LINE, LINE);
+    expect(r.winY).toBe(100);
+    expect(r.shift).toBeCloseTo(LINE - K, 2);
+    expect(r.winY / SF + K + r.shift).toBeCloseTo(LINE + 50, 2);
   });
 });
 

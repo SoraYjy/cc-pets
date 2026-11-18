@@ -1191,6 +1191,8 @@ let dragBounds: MonitorBounds | null = null; // mousedown 取一次，拖拽中�
 // 换肤/缩放都会被正确折算。可见区刷新时随 mon.scaleFactor 一起更新。
 let dragHeadOffsetPx = 0;
 let dragSf = 2; // 可见区刷新时的屏 scaleFactor（split 换算用）
+let dragCursor0Y = 0; // 抓取瞬间光标 y（物理 px，垂直增量基准）
+let dragWin0Y = 0; // 抓取瞬间窗口 y（物理 px）
 // 格顶 → 该皮肤实际不透明像素的最小距离（cell 像素）；蒙版失败 → 0（退回格顶口径）
 let cellHeadGapPx = 0;
 let lastBoundsRefreshAt = 0;
@@ -1291,12 +1293,17 @@ function dragTick(): void {
         DRAG_VISIBLE_MARGIN_PX,
         Number.NEGATIVE_INFINITY,
       );
-      // 垂直拆分：窗口顶到屏幕顶后，剩余向上位移转精灵窗内上滑，猫头贴线即停；
-      // split 输出上下行连续（head 严格 1:1 跟随光标直到贴线），无跳变。
+      // 垂直拆分（增量式）：头以抓取瞬间位置为基准跟随光标增量；窗口顶到
+      // 屏幕顶后，剩余向上位移转精灵窗内上滑（shift 加深），猫头贴线即停。
+      // 重抓瞬间 dy=0 → 原值返回，位置连续（旧绝对式会把 shift 归零重算，
+      // 猫瞬移回老钳制位——「跳回限制位置」实修）。
       const split = splitVerticalTarget(
-        target.y,
+        cursor.y,
+        dragCursor0Y,
+        dragWin0Y,
         dragSf,
         dragHeadOffsetPx / dragSf,
+        dragWin0Y / dragSf + dragHeadOffsetPx / dragSf + elemYShift,
         dragBounds.y / dragSf,
       );
       const shiftChanged = split.shift !== elemYShift;
@@ -1369,6 +1376,9 @@ function beginSelfDrawnDrag(): void {
     ]);
     if (!dragging || token !== dragToken) return;
     dragGrabOffset = grabOffset(cursor, origin);
+    // 垂直增量基准（splitVerticalTarget）：抓取瞬间的光标/窗口 y（物理 px）
+    dragCursor0Y = cursor.y;
+    dragWin0Y = origin.y;
     dragWinSize = { width: size.width, height: size.height };
     dFirstMoveOk = false;
     dFrameOk = 0;
