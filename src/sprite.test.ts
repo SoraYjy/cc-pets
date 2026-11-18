@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  cellTopWhitespace,
   decideCursorIgnore,
   frameAt,
   offsetFor,
@@ -9,6 +10,43 @@ import {
   type AnimationDef,
   type SkinDef,
 } from "./sprite";
+
+// 合成 2 列小图：RGBA 逐像素。helper 生成全透明底图，按行点亮 alpha。
+function makeSheet(rows: number, litRows: number[], alpha = 255): Uint8ClampedArray {
+  const data = new Uint8ClampedArray(rows * 2 * 4); // sheetW=2
+  for (const r of litRows) {
+    for (const x of [0, 1]) {
+      data[(r * 2 + x) * 4 + 3] = alpha;
+    }
+  }
+  return data;
+}
+
+describe("cellTopWhitespace", () => {
+  // 「拉不到顶」实修钉：钳制线必须贴真实猫头——皮肤格顶留白从蒙版实测，
+  // 不能按格顶估（lynn 留白约占格高 25%，按格顶算贴顶差一大截）。
+  it("measures the smallest within-cell offset across frames", () => {
+    // sheetW=2, cellH=4：cell0 首个不透明行=2（offset 2），cell1 首行=5（offset 1）
+    const data = makeSheet(8, [2, 5]);
+    expect(cellTopWhitespace(data, 2, 4, 16)).toBe(1);
+  });
+
+  it("takes the topmost opaque row within the first cell", () => {
+    const data = makeSheet(8, [1, 6]);
+    expect(cellTopWhitespace(data, 2, 4, 16)).toBe(1);
+  });
+
+  it("ignores pixels below the alpha threshold", () => {
+    const faint = makeSheet(8, [1], 15); // 低于阈值 16，视作透明
+    expect(cellTopWhitespace(faint, 2, 4, 16)).toBe(0);
+    const lit = makeSheet(8, [1], 16);
+    expect(cellTopWhitespace(lit, 2, 4, 16)).toBe(1);
+  });
+
+  it("returns 0 for a fully transparent sheet (fallback to cell-top)", () => {
+    expect(cellTopWhitespace(makeSheet(8, []), 2, 4, 16)).toBe(0);
+  });
+});
 
 const idle: AnimationDef = { name: "idle", row: 0, frames: 4, fps: 3, loop: true };
 const done: AnimationDef = { name: "done", row: 2, frames: 4, fps: 4, loop: false };

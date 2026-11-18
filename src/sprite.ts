@@ -33,6 +33,34 @@ export function decideCursorIgnore(
   return busy ? false : alpha < threshold;
 }
 
+// 皮肤内「真实猫头」顶部留白（「拉不到顶」实修）：精灵格顶到该皮肤实际
+// 不透明像素的最小距离（cell 像素、zoom=1 口径），跨全部帧取最小——钳制
+// 线贴真实猫头而非格顶，皮肤内留白不再吃掉贴顶高度。全透明数据 → 0。
+export function cellTopWhitespace(
+  data: Uint8ClampedArray | Uint8Array,
+  sheetW: number,
+  cellH: number,
+  threshold: number,
+): number {
+  let minOffset = Infinity;
+  const rows = Math.floor(data.length / 4 / sheetW);
+  for (let y = 0; y < rows; y++) {
+    const base = y * sheetW * 4;
+    let opaque = false;
+    for (let x = 0; x < sheetW; x++) {
+      if (data[base + x * 4 + 3] >= threshold) {
+        opaque = true;
+        break;
+      }
+    }
+    if (opaque) {
+      const off = y % cellH;
+      if (off < minOffset) minOffset = off;
+    }
+  }
+  return minOffset === Infinity ? 0 : minOffset;
+}
+
 function axisOffset(cellPx: number): string {
   const offset = -cellPx;
   // Avoid "-0px" — JS stringifies negative zero with the minus sign.

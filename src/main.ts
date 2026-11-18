@@ -22,6 +22,7 @@ import {
 } from "./format";
 import { pushCapped, type ChatEntry } from "./history";
 import {
+  cellTopWhitespace,
   decideCursorIgnore,
   frameAt,
   loadPet,
@@ -273,6 +274,8 @@ async function loadAlphaMask(url: string = `${PET_BASE}/spritesheet.png`): Promi
     ctx.drawImage(bitmap, 0, 0);
     sheetAlpha = ctx.getImageData(0, 0, SHEET_W, SHEET_H).data;
     alphaMaskUrl = url;
+    // 真实猫头留白（拖拽贴顶用）：随皮肤重解码一起更新，蒙版失败保持 0。
+    cellHeadGapPx = cellTopWhitespace(sheetAlpha, SHEET_W, CELL_H, ALPHA_THRESHOLD);
     startCursorPoll(); // 蒙版就绪，恒定轮询上线（幂等，换肤重解码不会叠加）
   } catch (err) {
     // No mask → hit testing stays off entirely (window behaves as before).
@@ -1143,9 +1146,12 @@ let dragGrabOffset: Physical | null = null; // mousedown 时一次性（物理 p
 let dragWinSize: { width: number; height: number } | null = null;
 let dragBounds: MonitorBounds | null = null; // mousedown 取一次，拖拽中定期刷新
 // 猫头基准钳制线用：精灵视觉头顶在窗口内的物理偏移 =
-// (ELEM_Y + CELL_H × (1 − zoom)) × sf——与气泡定位 headTop 同一条公式
-// （cell 顶即「头」锚点）。可见区刷新时随 mon.scaleFactor 一起更新。
+// (ELEM_Y + CELL_H × (1 − zoom) + 格顶留白 × zoom) × sf——格顶项与气泡
+// 定位 headTop 同源，「格顶留白」来自 alpha 蒙版实测（皮肤加载时算一次），
+// 换肤/缩放都会被正确折算。可见区刷新时随 mon.scaleFactor 一起更新。
 let dragHeadOffsetPx = 0;
+// 格顶 → 该皮肤实际不透明像素的最小距离（cell 像素）；蒙版失败 → 0（退回格顶口径）
+let cellHeadGapPx = 0;
 let lastBoundsRefreshAt = 0;
 let dragRafId: number | null = null;
 // 帧去重（v1.2 Task 2 精灵帧去重同思路）：按住不动时目标位置不变，
@@ -1212,7 +1218,9 @@ function dragTick(): void {
         dragBounds = monitorVisibleBounds(mon);
         // 猫头偏移随当前屏 sf 走；mon 探测失败时 Retina 2x 兜底（该分支
         // 本就退化成巨框不钳，偏移误差无实际影响）。
-        dragHeadOffsetPx = (ELEM_Y + CELL_H * (1 - clampPetZoom(petZoom))) * (mon?.scaleFactor ?? 2);
+        const z = clampPetZoom(petZoom);
+        dragHeadOffsetPx =
+          (ELEM_Y + CELL_H * (1 - z) + cellHeadGapPx * z) * (mon?.scaleFactor ?? 2);
         if (!dBoundsLogged) {
           dBoundsLogged = true;
           const raw = mon
@@ -1222,7 +1230,7 @@ function dragTick(): void {
                   : "none"
               }`
             : "monitor=null";
-          debug(`drag bounds ${raw} -> clamp box=(${dragBounds.x},${dragBounds.y},${dragBounds.width},${dragBounds.height}) headOff=${dragHeadOffsetPx}`);
+          debug(`drag bounds ${raw} -> clamp box=(${dragBounds.x},${dragBounds.y},${dragBounds.width},${dragBounds.height}) headOff=${dragHeadOffsetPx} gap=${cellHeadGapPx}`);
         }
       }
     }
