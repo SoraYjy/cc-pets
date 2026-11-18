@@ -17,18 +17,18 @@ export interface MonitorBounds {
   height: number;
 }
 
-// mousedown 时一次性：光标 − 窗口原点（均物理坐标）。拖拽全程每帧用
-// 「光标 + grabOffset」反推窗口左上角，抓取点在窗口内保持不动。
+// mousedown 时一次性：光标 − 窗口原点（均物理坐标）。刚性拖拽不变量
+// origin_new = cursor_new − (cursor₀ − origin₀)：每帧用「光标 − grabOffset」
+// 反推窗口左上角，抓取点相对屏幕始终不动（随光标平移的是整窗）。
 export function grabOffset(cursor: Physical, origin: Physical): Physical {
   return { x: cursor.x - origin.x, y: cursor.y - origin.y };
 }
 
 // 拖拽钳制（纯函数）：
-// - 窗口矩形与可见区交集两轴 ≥ margin（默认 48px，猫永不整没）；
-// - 左/右/底越界 → 钳到只剩 margin 可见的那条边界；
-// - 顶部越界 → 钳到可见区顶（visibleFrame 顶，即菜单栏下缘）——非对称规则：
-//   底部拖出半截可接受，顶部必须整窗可见，猫才能「贴住」菜单栏下缘；
-// - 完全在屏内 → 原样返回；
+// - 窗口矩形与可见区交集两轴 ≥ margin（默认 48px，窗口永不整没）；
+// - 四边对称：越界 → 钳到「只剩 margin 可见」的那条边界；顶部允许窗口
+//   悬挂越出可见区顶（猫可滑进菜单栏下缘、被不透明的菜单栏裁出贴住观感）；
+// - 完全在屏内（交集两轴已达窗尺寸）→ 原样返回；
 // - margin 对「窗口或显示器本身比 margin 还小」的退化场景自动收缩
 //   （effMargin = min(margin, 窗宽, 窗高, 可见区宽, 可见区高)），保证钳制
 //   区间不倒挂——不会出现负宽/负高的交集。
@@ -42,7 +42,7 @@ export function clampDrag(
   const effMargin = Math.min(margin, winW, winH, bounds.width, bounds.height);
   const xLo = bounds.x + effMargin - winW; // 窗右缘最多探出左界，留 effMargin 在屏内
   const xHi = bounds.x + bounds.width - effMargin; // 窗左缘探出右界前至少留 effMargin
-  const yTop = bounds.y; // 顶：整窗不得高于可见区顶
+  const yTop = bounds.y + effMargin - winH; // 顶：窗口可悬挂越出，直到只剩 effMargin 可见
   const yBot = bounds.y + bounds.height - effMargin; // 底：至少留 effMargin 可见
   return {
     x: Math.min(Math.max(pos.x, xLo), xHi),

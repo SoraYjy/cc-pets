@@ -42,16 +42,19 @@ describe("clampDrag", () => {
   });
 
   it("test_clamp_drag_top_to_visible_frame_top", () => {
-    // 顶部越界 → 钳到 visibleFrame 顶（菜单栏下缘），x 不动
+    // 轻微越顶不钳：y 向交集 = winH − (bounds.y − y) = 312 − 24 = 288 ≥ 48
     expect(clampDrag({ x: 500, y: 0 }, WIN_W, WIN_H, BOUNDS)).toEqual({
       x: 500,
-      y: 24,
+      y: 0,
     });
-    // 贴住菜单栏下缘的合法位置原样保留
-    expect(clampDrag({ x: 500, y: 24 }, WIN_W, WIN_H, BOUNDS)).toEqual({
+    // 悬挂越顶 → 钳到只剩 48px 可见：y = bounds.y + 48 − winH = −240（x 不动）
+    expect(clampDrag({ x: 500, y: -1000 }, WIN_W, WIN_H, BOUNDS)).toEqual({
       x: 500,
-      y: 24,
+      y: -240,
     });
+    // 交集验证：窗底缘 − 可见区顶 = (−240+312) − 24 = 48
+    const { y } = clampDrag({ x: 500, y: -1000 }, WIN_W, WIN_H, BOUNDS);
+    expect(Math.min(y + WIN_H, BOUNDS.y + BOUNDS.height) - Math.max(y, BOUNDS.y)).toBe(48);
   });
 
   it("test_clamp_drag_left_to_48px_visible", () => {
@@ -105,5 +108,35 @@ describe("clampDrag", () => {
     expect(ih).toBeGreaterThanOrEqual(0);
     expect(ih).toBe(10); // y 收回屏内：交集 = 窗高本身
     expect(r.y).toBe(70); // 底钳：70+10=80 贴住可见区底缘
+  });
+});
+
+describe("drag round trip", () => {
+  it("test_round_trip_grab_point_screen_stationary", () => {
+    // 组合往返（刚性拖拽不变量）：origin_new = cursor_new − (cursor₀ − origin₀)
+    // 路径上抓取点相对屏幕不动。评审例：cursor0=(488,512), origin0=(200,200)
+    // → grabOffset=(288,312)；cursor_new=(448,462) → origin_new=(160,150)。
+    const cursor0 = { x: 488, y: 512 };
+    const origin0 = { x: 200, y: 200 };
+    const offset = grabOffset(cursor0, origin0);
+    expect(offset).toEqual({ x: 288, y: 312 });
+
+    const cursorNew = { x: 448, y: 462 };
+    const rawNew = { x: cursorNew.x - offset.x, y: cursorNew.y - offset.y };
+    const originNew = clampDrag(rawNew, WIN_W, WIN_H, BOUNDS);
+    expect(originNew).toEqual({ x: 160, y: 150 }); // 屏内，钳制不干预
+
+    // 抓取点在两次快照中同为屏幕上同一点：cursor − origin 恒等
+    expect(cursorNew.x - originNew.x).toBe(cursor0.x - origin0.x);
+    expect(cursorNew.y - originNew.y).toBe(cursor0.y - origin0.y);
+  });
+
+  it("test_round_trip_with_clamp_keeps_window_bounded", () => {
+    // 光标甩出屏外时，钳制接管但窗位仍沿同一刚性映射方向（贴边界不翻转）
+    const offset = grabOffset({ x: 488, y: 512 }, { x: 200, y: 200 });
+    const raw = { x: 2600 - offset.x, y: 462 - offset.y }; // 光标远在右界外
+    const clamped = clampDrag(raw, WIN_W, WIN_H, BOUNDS);
+    expect(clamped.x).toBe(1920 - 48); // 右钳：窗左缘距右界 48px
+    expect(clamped.y).toBe(raw.y); // y 方向屏内不动
   });
 });

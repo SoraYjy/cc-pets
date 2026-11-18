@@ -527,6 +527,8 @@ function setupListeners(): void {
     // 断，手势状态不能卡死在 dragging，立即收尾。
     if (!focused) {
       if (dragging) endSelfDrawnDrag();
+      // 失焦后 mouseup 永远不会到达——按下态一并清掉，手势钉不能卡死。
+      pointerPressed = false;
       return;
     }
     if (Date.now() - lastNotificationAt >= NOTIFICATION_FOCUS_WINDOW_MS) return;
@@ -1187,8 +1189,10 @@ function dragTick(): void {
     if (dragGrabOffset && dragWinSize && dragBounds) {
       const cursor = await cursorPosition();
       if (!dragging) return;
+      // 刚性拖拽不变量：origin_new = cursor_new − (cursor₀ − origin₀)，
+      // 抓取点相对屏幕不动——公式是「减」，加号会让首帧瞬移 2×grabOffset。
       const target = clampDrag(
-        { x: cursor.x + dragGrabOffset.x, y: cursor.y + dragGrabOffset.y },
+        { x: cursor.x - dragGrabOffset.x, y: cursor.y - dragGrabOffset.y },
         dragWinSize.width,
         dragWinSize.height,
         dragBounds,
@@ -1199,8 +1203,8 @@ function dragTick(): void {
         dragLastApplied.x !== target.x ||
         dragLastApplied.y !== target.y
       ) {
-        dragLastApplied = target;
         await getCurrentWindow().setPosition(new PhysicalPosition(target.x, target.y));
+        dragLastApplied = target; // 落账在成功之后：reject 不记，瞬态失败不丢帧
       }
     }
   })()
@@ -1229,8 +1233,8 @@ function beginSelfDrawnDrag(): void {
   const token = ++dragToken;
   const win = getCurrentWindow();
   // 竞态取舍（报告已注明）：cursorPosition 与 outerPosition 异步取回前
-  // 光标可能已移动——以「取回时刻」的差值为准，从取回那一刻起猫贴住光标，
-  // 不试图回放按下瞬间的几何。
+  // 光标可能已移动——以「取回时刻」的差值为准，从取回那一刻起抓取点跟随
+  // 光标（窗位 = 光标 − 抓取偏移），不试图回放按下瞬间的几何。
   void (async () => {
     const [cursor, origin, size] = await Promise.all([
       cursorPosition(),
@@ -1247,6 +1251,7 @@ function beginSelfDrawnDrag(): void {
   });
   dragBounds = null;
   dragWinSize = null;
+  dragLastApplied = null; // 与 end 对称：新拖拽的帧去重从零开始
   lastBoundsRefreshAt = 0;
   ensureDragLoop();
 }
