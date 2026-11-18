@@ -1,8 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import { currentMonitor, cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  currentMonitor,
+  cursorPosition,
+  getCurrentWindow,
+  PhysicalPosition,
+  type Monitor,
+} from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { clampPetZoom } from "./theme";
+import { clampDrag, grabOffset, type MonitorBounds, type Physical } from "./drag";
 import {
   isPermissionGranted,
   requestPermission,
@@ -515,7 +522,13 @@ function setupListeners(): void {
   // v1.2 Task 3: pet 窗聚焦 = 应用被激活（点通知 / Cmd-Tab 切回 / Dock 点击
   // 都走这里）——启发式把「60s 内有未消费的通知」当成弹气泡的许可。
   void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-    if (!focused) return;
+    // v1.3 Task 2 失焦保险丝：自绘拖拽依赖 mousemove 事件流（AppKit 只投递
+    // 给 key 窗口）——拖拽中意外失焦（Spotlight/别的应用抢焦点）时事件流会
+    // 断，手势状态不能卡死在 dragging，立即收尾。
+    if (!focused) {
+      if (dragging) endSelfDrawnDrag();
+      return;
+    }
     if (Date.now() - lastNotificationAt >= NOTIFICATION_FOCUS_WINDOW_MS) return;
     if (bubbleShownSinceNotification) return;
     revealChatForNotification().catch((err: unknown) =>
@@ -1099,10 +1112,161 @@ function setupGlobalErrorHooks(): void {
   });
 }
 
+// ===== Self-drawn drag (v1.3 Task 2) =====
+
+// startDragging（原生窗口拖拽）已移除，改为自绘：mousemove 越阈值后每帧
+// cursorPosition() → pos = cursor + grabOffset → clampDrag → setPosition。
+// 好处：钳制逻辑归我们管（猫可以贴住菜单栏下缘、永远留屏内 ≥48px），
+// 而原生 startDragging 把几何全交给 OS、管不到。
+
+// 事件连续性依据：AppKit 把 mouse-moved/dragged 投递给 key 窗口、即使光标
+// 越出窗口边界——拖拽中 pet 窗必为 key，事件流不会断。保险丝：onFocusChanged
+// 在拖拽中失焦 → 立即结束拖拽（见 setupListeners），防止事件流意外中断时
+// 手势状态卡死（rAF 永远跟光标走）。
+const DRAG_VISIBLE_MARGIN_PX = 48; // 猫离屏前至少保留的可见像素（左/右/底）
+const MONITOR_BOUNDS_REFRESH_MS = 500; // 拖拽中显示器可见区的刷新周期（跨屏）
+const MENUBAR_FALLBACK_LOGICAL_PX = 24; // workArea 缺失时的菜单栏常高兜底
+
+let dragGrabOffset: Physical | null = null; // mousedown 时一次性（物理 px）
+// 窗口外框物理尺寸：tauri.conf 的 288×312 是逻辑 px，Retina 屏上物理外框
+// 是它的 scaleFactor 倍——钳制输入必须同单位，开拖时用 outerSize() 实测。
+let dragWinSize: { width: number; height: number } | null = null;
+let dragBounds: MonitorBounds | null = null; // mousedown 取一次，拖拽中定期刷新
+let lastBoundsRefreshAt = 0;
+let dragRafId: number | null = null;
+// 帧去重（v1.2 Task 2 精灵帧去重同思路）：按住不动时目标位置不变，
+// 不再每帧空转一次 setPosition IPC（60Hz ≈ 3600 次/分的恒等写）。
+let dragLastApplied: Physical | null = null;
+// 抓取竞态令牌：取回 cursorPosition/outerPosition 前用户可能已松手甚至再次
+// 按下——陈旧请求的结果不得写进新一轮拖拽的状态。
+let dragToken = 0;
+
+// currentMonitor() → 拖拽钳制用的可见区矩形（物理 px）。主路 workArea =
+// NSScreen.visibleFrame（菜单栏下缘为顶；tauri-runtime-wry 的 MonitorExt
+// 在 macOS 上正是这么算的）。workArea 缺失/退化时按简报裁决回退：完整
+// bounds − 菜单栏常高（~24 逻辑 px × scaleFactor）。currentMonitor() 返回
+// null（无法探测）→ 巨大矩形等价于不钳：宁可不钳，也不把猫锁进错误区域。
+function monitorVisibleBounds(mon: Monitor | null): MonitorBounds {
+  if (mon) {
+    const wa = mon.workArea as
+      | { position?: Physical; size?: { width: number; height: number } }
+      | undefined;
+    if (wa?.position && wa.size && wa.size.width > 0 && wa.size.height > 0) {
+      return {
+        x: wa.position.x,
+        y: wa.position.y,
+        width: wa.size.width,
+        height: wa.size.height,
+      };
+    }
+    const top = Math.round(MENUBAR_FALLBACK_LOGICAL_PX * mon.scaleFactor);
+    return {
+      x: mon.position.x,
+      y: mon.position.y + top,
+      width: mon.size.width,
+      height: Math.max(1, mon.size.height - top),
+    };
+  }
+  return { x: -10_000_000, y: -10_000_000, width: 20_000_000, height: 20_000_000 };
+}
+
+// 每帧一次：rAF 合并 mousemove。self-pacing——本帧 setPosition 落盘后才排
+// 下一帧，IPC 不堆叠；快速拖动丢帧可接受（简报档位），窗口不丢。
+function dragTick(): void {
+  if (!dragging) {
+    dragRafId = null;
+    return;
+  }
+  void (async () => {
+    // 可见区每 ~500ms 刷新：跨屏拖动时猫跟着新屏的 workArea/菜单栏走
+    if (Date.now() - lastBoundsRefreshAt >= MONITOR_BOUNDS_REFRESH_MS) {
+      lastBoundsRefreshAt = Date.now();
+      const mon = await currentMonitor().catch(() => null);
+      if (dragging) dragBounds = monitorVisibleBounds(mon);
+    }
+    if (dragGrabOffset && dragWinSize && dragBounds) {
+      const cursor = await cursorPosition();
+      if (!dragging) return;
+      const target = clampDrag(
+        { x: cursor.x + dragGrabOffset.x, y: cursor.y + dragGrabOffset.y },
+        dragWinSize.width,
+        dragWinSize.height,
+        dragBounds,
+        DRAG_VISIBLE_MARGIN_PX,
+      );
+      if (
+        !dragLastApplied ||
+        dragLastApplied.x !== target.x ||
+        dragLastApplied.y !== target.y
+      ) {
+        dragLastApplied = target;
+        await getCurrentWindow().setPosition(new PhysicalPosition(target.x, target.y));
+      }
+    }
+  })()
+    .catch((err: unknown) => console.error("drag frame failed:", err))
+    .finally(() => {
+      if (dragging) {
+        dragRafId = requestAnimationFrame(dragTick);
+      } else {
+        dragRafId = null;
+      }
+    });
+}
+
+function ensureDragLoop(): void {
+  if (dragRafId === null) {
+    dragRafId = requestAnimationFrame(dragTick);
+  }
+}
+
+// 越阈值（dist > 4）时进入自绘拖拽。同步置 dragging = true：命中探针的
+// 手势钉（applyHitTesting 在 pointerPressed||dragging 时不穿透）当场生效，
+// 且同一按下周期不会重复进入。抓取偏移异步补齐，取回前的帧直接跳过落窗。
+function beginSelfDrawnDrag(): void {
+  if (dragging) return;
+  dragging = true;
+  const token = ++dragToken;
+  const win = getCurrentWindow();
+  // 竞态取舍（报告已注明）：cursorPosition 与 outerPosition 异步取回前
+  // 光标可能已移动——以「取回时刻」的差值为准，从取回那一刻起猫贴住光标，
+  // 不试图回放按下瞬间的几何。
+  void (async () => {
+    const [cursor, origin, size] = await Promise.all([
+      cursorPosition(),
+      win.outerPosition(),
+      win.outerSize(),
+    ]);
+    if (!dragging || token !== dragToken) return;
+    dragGrabOffset = grabOffset(cursor, origin);
+    dragWinSize = { width: size.width, height: size.height };
+  })().catch((err: unknown) => {
+    // 抓取失败 → 拖拽作废回安全态：宁可拖不动，不可手势卡死
+    console.error("drag begin failed:", err);
+    if (token === dragToken) endSelfDrawnDrag();
+  });
+  dragBounds = null;
+  dragWinSize = null;
+  lastBoundsRefreshAt = 0;
+  ensureDragLoop();
+}
+
+function endSelfDrawnDrag(): void {
+  dragging = false;
+  dragGrabOffset = null;
+  dragWinSize = null;
+  dragBounds = null;
+  dragLastApplied = null;
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+    dragRafId = null;
+  }
+}
+
 // Attach pointer-based drag/click detection to the whole document.
-// mousedown records origin; mousemove past the threshold hands off to the
-// native window drag (fired exactly once per press); mouseup that never
-// dragged and stays within thresholds counts as a click on the pet.
+// mousedown records origin; mousemove past the threshold enters the
+// self-drawn drag (fired exactly once per press); mouseup that never dragged
+// and stays within thresholds counts as a click on the pet.
 function setupPointerInteractions(): void {
   let x0 = 0;
   let y0 = 0;
@@ -1122,10 +1286,7 @@ function setupPointerInteractions(): void {
     if (!pointerPressed || dragging) return;
     const dist = Math.hypot(e.clientX - x0, e.clientY - y0);
     if (dist > DRAG_THRESHOLD_PX) {
-      dragging = true;
-      getCurrentWindow()
-        .startDragging()
-        .catch((err) => console.error("startDragging failed:", err));
+      beginSelfDrawnDrag(); // v1.3 Task 2: 自绘拖拽取代 startDragging
     }
   });
 
@@ -1141,7 +1302,7 @@ function setupPointerInteractions(): void {
         );
       }
     }
-    dragging = false;
+    endSelfDrawnDrag(); // 停 rAF + 清拖拽态（click 判定零改动）
   });
 }
 
