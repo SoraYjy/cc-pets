@@ -8,14 +8,16 @@ export default defineConfig(() => ({
   // serve assets/ as static root so /pet/pet.json and /pet/spritesheet.png are reachable
   publicDir: "assets",
 
-  // three entries: the pet window (index.html), the chat bubble window
-  // (chat.html) and the sessions panel (sessions.html, v1.2 Task 4)
+  // four entries: the pet window (index.html), the chat bubble window
+  // (chat.html), the sessions panel (sessions.html, v1.2 Task 4) and the
+  // settings window (settings.html, v1.3.x Task 1)
   build: {
     rollupOptions: {
       input: {
         main: "index.html",
         chat: "chat.html",
         sessions: "sessions.html",
+        settings: "settings.html",
       },
     },
   },

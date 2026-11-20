@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, RunEvent};
 
+mod app_menu;
 mod chat;
 mod opener;
 mod settings;
@@ -102,6 +103,10 @@ pub fn run() {
                 self_pids: Arc::new(Mutex::new(HashSet::new())),
                 poller_stop: poller_stop.clone(),
             });
+
+            // 应用菜单（macOS 菜单栏）：cc-pets（设置… ⌘,）/ 编辑 / 窗口。
+            // 「设置…」的窗口打开逻辑在 Rust 侧（app_menu.rs），菜单事件同点分发。
+            app_menu::install(app)?;
 
             // watcher 轮询线程：独立 std::thread，不阻塞主线程；
             // 停止来源 = AppState.poller_stop（退出钩子置真）

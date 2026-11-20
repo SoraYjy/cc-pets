@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/settings.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>cc-pets 设置</title>
+    <script type="module" src="/src/settings.ts" defer></script>
+  </head>
+  <body>
+    <main id="settings">
+      <!-- v1.3.x Task 1 骨架：只读占位行，settings.ts 载入后回填 get_settings
+           的四项值。Task 2 把 .field 行整体替换为完整控件（风格芯片 a/b/c、
+           透明度滑杆 0.3–1.0、大小滑杆 0.5–1.5、皮肤芯片）。DOM id 是 T1↔T2
+           的接线契约：value-style / value-opacity / value-pet-skin /
+           value-pet-zoom。 -->
+      <section id="settings-fields">
+        <div class="field">
+          <span class="field-label">聊天窗风格</span>
+          <span id="value-style" class="field-value"></span>
+        </div>
+        <div class="field">
+          <span class="field-label">气泡透明度</span>
+          <span id="value-opacity" class="field-value"></span>
+        </div>
+        <div class="field">
+          <span class="field-label">宠物皮肤</span>
+          <span id="value-pet-skin" class="field-value"></span>
+        </div>
+        <div class="field">
+          <span class="field-label">宠物大小</span>
+          <span id="value-pet-zoom" class="field-value"></span>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
