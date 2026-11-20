@@ -10,28 +10,10 @@
   <!-- theme-c is the default; chat.ts re-applies from settings at startup -->
   <body class="theme-c">
     <main id="chat">
-      <!-- v1.1 settings panel: hidden by default, toggled by ⚙ -->
+      <!-- v1.3.x settings panel: hidden by default, toggled by ⚙。四项设置
+           （风格/透明度/皮肤/大小）已迁入原生设置窗口（v1.3.x Task 2，
+           chat-appearance-changed 等事件回传本窗）；面板只剩清屏/重开。 -->
       <div id="settings-panel" hidden>
-        <div class="style-chips" role="group" aria-label="聊天窗风格">
-          <button class="chip" data-style="a" type="button">漫画 A</button>
-          <button class="chip" data-style="b" type="button">极简 B</button>
-          <button class="chip" data-style="c" type="button">贴纸 C</button>
-        </div>
-        <!-- v1.2 皮肤芯片组：芯片由 chat.ts 从 get_skins（pet.json skins 映射）动态渲染 -->
-        <div class="skin-row">
-          <span class="skin-label">皮肤</span>
-          <div class="skin-chips" id="skin-chips" role="group" aria-label="宠物皮肤"></div>
-        </div>
-        <label class="alpha-row">
-          <span>透明度</span>
-          <input id="alpha" type="range" min="0.3" max="1" step="0.01" />
-          <span id="alpha-value">0.92</span>
-        </label>
-        <label class="alpha-row">
-          <span>大小</span>
-          <input id="pet-zoom" type="range" min="0.5" max="1.5" step="0.05" />
-          <span id="pet-zoom-value">1.00</span>
-        </label>
         <!-- 破坏性动作放面板内、不贴头部误触区（acceptance-fix-10） -->
         <div class="panel-actions">
           <button id="clear-screen" type="button">清屏（保留会话）</button>

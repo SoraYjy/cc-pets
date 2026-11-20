@@ -9,8 +9,6 @@ import { decideDoneFallback, type ChatEntry } from "./history";
 import { renderMarkdown } from "./markdown";
 import {
   clampOpacity,
-  clampPetZoom,
-  normalizePetSkin,
   normalizeStyle,
   type ThemeStyle,
 } from "./theme";
@@ -39,14 +37,8 @@ const closeBtn = document.getElementById("close") as HTMLButtonElement;
 const titlebarEl = document.getElementById("titlebar") as HTMLElement;
 const settingsToggle = document.getElementById("settings-toggle") as HTMLButtonElement;
 const settingsPanel = document.getElementById("settings-panel") as HTMLElement;
-const alphaRange = document.getElementById("alpha") as HTMLInputElement;
-const alphaValue = document.getElementById("alpha-value") as HTMLElement;
-const petZoomRange = document.getElementById("pet-zoom") as HTMLInputElement;
-const petZoomValue = document.getElementById("pet-zoom-value") as HTMLElement;
-const styleChips = Array.from(document.querySelectorAll<HTMLButtonElement>(".chip"));
 const clearBtn = document.getElementById("clear-screen") as HTMLButtonElement;
 const restartBtn = document.getElementById("restart-session") as HTMLButtonElement;
-const skinChipsEl = document.getElementById("skin-chips") as HTMLElement;
 
 let sending = false;
 let streamingBubble: HTMLElement | null = null;
@@ -415,159 +407,40 @@ window.addEventListener("unhandledrejection", (e) => {
   logLine(`[chat] unhandled rejection: ${String(e.reason)}`);
 });
 
-// ===== Settings (v1.1): three themes + window opacity =====
-
-// get_settings payload (src-tauri/src/settings.rs Settings { style, opacity,
-// petSkin }). petSkin (v1.2) 是宠物皮肤 id，换肤可用集经 get_skins 判断。
+// ===== 外观（v1.3.x：设置迁入原生设置窗口，本窗只消费事件）=====
+//
+// 四项设置（风格/透明度/皮肤/大小）的 UI 与 save_settings/事件发射已迁入
+// 设置窗口（src/settings.ts）；本窗只负责「应用」：
+// - 启动时 get_settings 兜底（皮肤/大小归 pet 窗管，本窗只取 style/opacity）
+// - 监听 chat-appearance-changed（设置窗发）实时应用
 interface SettingsPayload {
   style: string;
   opacity: number;
-  petSkin?: string;
-  pet_zoom?: number;
 }
 
 let currentStyle: ThemeStyle = "c";
 let currentOpacity = 0.92;
-let currentSkin = "default";
-let currentPetZoom = 1.0;
 
-// apply = swap the body theme class + write the CSS alpha variable + sync the
-// zoom slider UI. The window background and every theme rule read the class /
-// --win-alpha live, so this one function is the whole "make it so" (normalize
-// also guards hand-edited settings.json values). petZoom only updates the
-// slider UI here — the pet window owns its own transform via the
-// pet-zoom-changed event (and loads settings itself at startup).
-function applySettings(
-  style: string | undefined,
-  opacity: number,
-  petZoom?: number,
-): void {
+// apply = swap the body theme class + write the CSS alpha variable. The
+// window background and every theme rule read the class / --win-alpha live,
+// so this one function is the whole "make it so" (normalize also guards
+// hand-edited settings.json values).
+function applyAppearance(style: string | undefined, opacity: number): void {
   currentStyle = normalizeStyle(style);
   currentOpacity = clampOpacity(opacity);
-  if (petZoom !== undefined) {
-    currentPetZoom = clampPetZoom(petZoom);
-  }
   document.body.className = `theme-${currentStyle}`;
   document.documentElement.style.setProperty("--win-alpha", String(currentOpacity));
-  alphaRange.value = String(currentOpacity);
-  alphaValue.textContent = String(currentOpacity);
-  petZoomRange.value = String(currentPetZoom);
-  petZoomValue.textContent = currentPetZoom.toFixed(2);
-  for (const chip of styleChips) {
-    chip.classList.toggle("active", chip.dataset.style === currentStyle);
-  }
 }
 
-// Persist current settings; a failed save keeps the applied look and degrades
-// silently to one debug-log line.
-function saveSettings(): void {
-  invoke("save_settings", {
-    style: currentStyle,
-    opacity: currentOpacity,
-    petSkin: currentSkin,
-    petZoom: currentPetZoom,
-  }).catch((err: unknown) => {
-    console.error("save_settings failed:", err);
-    logLine(`[chat] save_settings failed: ${String(err)}`);
-  });
-}
-
+// ⚙ 面板瘦身（v1.3.x Task 2）：只剩清屏/重开两按钮（chat.html 同步）。
 settingsToggle.addEventListener("click", () => {
   settingsPanel.hidden = !settingsPanel.hidden;
 });
 
-// 风格芯片：点选即 apply（换主题类）+ save（opacity/petSkin 保持当前值）。
-for (const chip of styleChips) {
-  chip.addEventListener("click", () => {
-    applySettings(chip.dataset.style, currentOpacity);
-    saveSettings();
-  });
-}
-
-// ===== 皮肤芯片（v1.2 多皮肤）=====
-
-// get_skins payload（src-tauri/src/skins.rs）：pet.json skins 映射，
-// id（= settings.petSkin 值）→ { spritesheetPath, displayName }。
-interface SkinDefPayload {
-  spritesheetPath: string;
-  displayName: string;
-}
-
-type SkinsPayload = Record<string, SkinDefPayload>;
-
-// 点选皮肤：本地态更新 + save（持久化 petSkin）+ 全局广播 skin-changed——
-// pet 窗监听后重新 loadPet 并重启精灵动画，换肤即时生效、无需重启
-// （emit 全局事件是最简通路：pet 窗本就有 listen 基建，无需经后端转发）。
-function selectSkin(id: string): void {
-  if (id === currentSkin) return;
-  currentSkin = id;
-  syncSkinChipActive();
-  saveSettings();
-  void emit("skin-changed", { skinId: id }).catch((err: unknown) => {
-    console.error("skin-changed emit failed:", err);
-    logLine(`[chat] skin-changed emit failed: ${String(err)}`);
-  });
-}
-
-function syncSkinChipActive(): void {
-  for (const chip of skinChipsEl.querySelectorAll<HTMLButtonElement>(".chip")) {
-    chip.classList.toggle("active", chip.dataset.skin === currentSkin);
-  }
-}
-
-// 芯片从 get_skins 动态渲染（皮肤数随导入增长，不写死 HTML）；
-// displayName 取 pet.json skins 映射，空则退回 id。
-function renderSkinChips(skins: SkinsPayload): void {
-  skinChipsEl.textContent = "";
-  for (const [id, def] of Object.entries(skins)) {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "chip";
-    chip.dataset.skin = id;
-    chip.textContent = def.displayName || id;
-    chip.addEventListener("click", () => selectSkin(id));
-    skinChipsEl.appendChild(chip);
-  }
-  syncSkinChipActive();
-}
-
-void invoke<SkinsPayload>("get_skins")
-  .then((skins) => {
-    // 可用集在前端判断：settings 里的 petSkin 若不在 skins 集 → 回 default
-    // 并在重启后随保存归位（Rust 侧刻意不校验，见 settings.rs）。
-    if (Object.keys(skins).length > 0 && !skins[currentSkin]) {
-      currentSkin = "default";
-    }
-    renderSkinChips(skins);
-  })
-  .catch((err: unknown) => {
-    // get_skins 失败（pet.json 读不出）：退一枚 default 芯片，面板仍可用。
-    console.error("get_skins failed:", err);
-    logLine(`[chat] get_skins failed: ${String(err)}`);
-    renderSkinChips({
-      default: { spritesheetPath: "spritesheet.png", displayName: "默认" },
-    });
-  });
-
-// 透明度滑杆：input 即时 apply（只动 --win-alpha，拖动全程平滑），change 才 save。
-alphaRange.addEventListener("input", () => {
-  currentOpacity = clampOpacity(Number(alphaRange.value));
-  document.documentElement.style.setProperty("--win-alpha", String(currentOpacity));
-  alphaValue.textContent = String(currentOpacity);
+// 设置窗改动风格/透明度 → 实时应用（input 事件流：拖动全程平滑）。
+void listen<{ style: string; opacity: number }>("chat-appearance-changed", (e) => {
+  applyAppearance(e.payload.style, e.payload.opacity);
 });
-alphaRange.addEventListener("change", saveSettings);
-
-// 大小滑杆（acceptance-fix-12）：input 即时 emit pet-zoom-changed（pet 窗实时
-// transform 缩放并同步命中映射），change 才 save（pet_zoom 持久化）。
-petZoomRange.addEventListener("input", () => {
-  currentPetZoom = clampPetZoom(Number(petZoomRange.value));
-  petZoomValue.textContent = currentPetZoom.toFixed(2);
-  void emit("pet-zoom-changed", { zoom: currentPetZoom }).catch((err: unknown) => {
-    console.error("pet-zoom-changed emit failed:", err);
-    logLine(`[chat] pet-zoom-changed emit failed: ${String(err)}`);
-  });
-});
-petZoomRange.addEventListener("change", saveSettings);
 
 // ===== 清屏 / 重开会话（acceptance-fix-10）=====
 
@@ -648,17 +521,14 @@ restartBtn.addEventListener("click", () => {
 });
 
 // Startup load; read failure → defaults + one debug line (读不出来不挡聊天).
-// get_settings 与 get_skins 互相独立、到达顺序不定：两路各自落 currentSkin /
-// 芯片 DOM，后到的 syncSkinChipActive 兜住高亮，不会互相覆盖。
+// 皮肤/大小不在此读——归 pet 窗（skin-changed / pet-zoom-changed 事件链路）。
 void invoke<SettingsPayload>("get_settings")
   .then((s) => {
-    applySettings(s.style, s.opacity, s.pet_zoom);
-    currentSkin = normalizePetSkin(s.petSkin);
-    syncSkinChipActive();
+    applyAppearance(s.style, s.opacity);
   })
   .catch((err: unknown) => {
     console.error("get_settings failed, falling back to defaults:", err);
-    applySettings("c", 0.92, 1.0);
+    applyAppearance("c", 0.92);
     logLine(`[chat] get_settings failed, defaults applied: ${String(err)}`);
   });
 

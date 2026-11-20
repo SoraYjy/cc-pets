@@ -123,13 +123,16 @@ pub fn open_settings_window(app: &AppHandle) {
         };
 
     // close → hide：拦原生关闭按钮，prevent_close 后自己 hide（窗口保留，
-    // 再点菜单走 show+focus 路径）。hide 失败静默——与 chat 前端 hide 同口径。
+    // 再点菜单走 show+focus 路径）。hide 失败不静默，落一行 debug 日志留
+    // 时间线证据（chat 前端 hide() 失败同样具名落日志，口径一致）。
     let for_close = win.clone();
     win.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             crate::log_line("settings close requested → hide");
-            let _ = for_close.hide();
+            if let Err(e) = for_close.hide() {
+                crate::log_line(&format!("settings hide failed: {e}"));
+            }
         }
     });
     let _ = win.set_focus();
@@ -157,14 +160,15 @@ mod tests {
         );
     }
 
-    /// settings.html 必须接进 vite 多页 input——漏了则 devServer 偶然可跑、
-    /// 打包版打开设置窗 404。
+    /// settings.html 必须接进 vite 多页 input 的字面条目（key: value）——
+    /// 只 contains 页面名会被注释豁免（T2 评审加固），漏了则 devServer 偶然
+    /// 可跑、打包版打开设置窗 404。
     #[test]
     fn settings_page_is_registered_in_vite_inputs() {
         let vite = include_str!("../../vite.config.ts");
         assert!(
-            vite.contains(SETTINGS_PAGE),
-            "vite.config.ts rollupOptions.input 必须含 settings.html"
+            vite.contains(r#"settings: "settings.html""#),
+            r#"vite.config.ts rollupOptions.input 必须含字面条目 settings: "settings.html""#
         );
     }
 

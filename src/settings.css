@@ -1,6 +1,97 @@
-/* cc-pets 设置窗口样式挂接（v1.3.x Task 1 骨架，实际样式归 Task 2）。
+/* cc-pets 设置窗口样式（v1.3.x Task 2：四项设置控件）。
  *
- * 窗口为原生标题栏（decorations true, 360×420 内窗, 不可缩放），骨架阶段
- * 只读占位行走浏览器默认流式布局即可辨识；Task 2 迁入完整控件时在此填充。
- * 结构契约见 settings.html（#settings / .field / value-* id）。
+ * 窗口为原生标题栏（decorations true, 360×420 内窗, 不可缩放），普通文档流
+ * 页面，无 --win-alpha / theme-* 变体（原生窗自带系统底色）。芯片/滑杆控件
+ * 家族自气泡 ⚙ 面板迁入，观感保持一致。结构契约见 settings.html
+ * （#settings / .field / alpha·pet-zoom·skin-chips id）。
  */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, -apple-system, "PingFang SC", "Hiragino Sans GB", sans-serif;
+  font-size: 12px;
+  color: #2b2b3a;
+}
+
+#settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  opacity: 0.6;
+}
+
+.field-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 风格芯片（.chip 家族与旧 ⚙ 面板同款：默认淡、active 描边加重） */
+.style-chips {
+  display: flex;
+  gap: 4px;
+}
+
+.chip {
+  flex: 1;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+}
+
+.chip:hover {
+  opacity: 1;
+}
+
+.chip.active {
+  border-color: currentColor;
+  opacity: 1;
+  font-weight: 600;
+}
+
+/* 皮肤芯片组：复用 .chip 家族样式；容器可换行——皮肤数随导入增长，不像
+   主题芯片固定三枚，所以不平均拉伸（flex:none + 允许 wrap）。 */
+.skin-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.skin-chips .chip {
+  flex: none;
+  min-width: 3em;
+}
+
+/* 滑杆 + 数值：数值右对齐、等宽数字防抖动 */
+#alpha,
+#pet-zoom {
+  flex: 1;
+  margin: 0;
+  accent-color: #3a4a6b;
+}
+
+#alpha-value,
+#pet-zoom-value {
+  min-width: 2.8em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

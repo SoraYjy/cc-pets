@@ -9,28 +9,37 @@
   </head>
   <body>
     <main id="settings">
-      <!-- v1.3.x Task 1 骨架：只读占位行，settings.ts 载入后回填 get_settings
-           的四项值。Task 2 把 .field 行整体替换为完整控件（风格芯片 a/b/c、
-           透明度滑杆 0.3–1.0、大小滑杆 0.5–1.5、皮肤芯片）。DOM id 是 T1↔T2
-           的接线契约：value-style / value-opacity / value-pet-skin /
-           value-pet-zoom。 -->
+      <!-- v1.3.x Task 2：四项设置控件完整迁入（自气泡 ⚙ 面板）。DOM id 接线
+           契约：alpha / alpha-value / pet-zoom / pet-zoom-value / skin-chips；
+           风格芯片以 .style-chips .chip[data-style] 寻址。 -->
       <section id="settings-fields">
         <div class="field">
           <span class="field-label">聊天窗风格</span>
-          <span id="value-style" class="field-value"></span>
+          <div class="style-chips" role="group" aria-label="聊天窗风格">
+            <button class="chip" data-style="a" type="button">漫画 A</button>
+            <button class="chip" data-style="b" type="button">极简 B</button>
+            <button class="chip" data-style="c" type="button">贴纸 C</button>
+          </div>
         </div>
-        <div class="field">
+        <label class="field">
           <span class="field-label">气泡透明度</span>
-          <span id="value-opacity" class="field-value"></span>
-        </div>
+          <span class="field-control">
+            <input id="alpha" type="range" min="0.3" max="1" step="0.01" />
+            <span id="alpha-value">0.92</span>
+          </span>
+        </label>
         <div class="field">
           <span class="field-label">宠物皮肤</span>
-          <span id="value-pet-skin" class="field-value"></span>
+          <!-- 皮肤芯片由 settings.ts 从 get_skins（pet.json skins 映射）渲染 -->
+          <div class="skin-chips" id="skin-chips" role="group" aria-label="宠物皮肤"></div>
         </div>
-        <div class="field">
+        <label class="field">
           <span class="field-label">宠物大小</span>
-          <span id="value-pet-zoom" class="field-value"></span>
-        </div>
+          <span class="field-control">
+            <input id="pet-zoom" type="range" min="0.5" max="1.5" step="0.05" />
+            <span id="pet-zoom-value">1.00</span>
+          </span>
+        </label>
       </section>
     </main>
   </body>

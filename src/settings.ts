@@ -1,25 +1,33 @@
-// cc-pets 设置窗口骨架（v1.3.x Task 1）。
+// cc-pets 设置窗口（v1.3.x Task 2：四项设置完整 UI + 事件接线）。
 //
 // 窗口由 Rust 侧创建与管理（src-tauri/src/app_menu.rs）：菜单「设置… ⌘,」
 // open（已存在 → show+focus，不存在 → create），原生关闭按钮被
-// CloseRequested 拦下转 hide——本页 webview 生命周期内只 load 一次，与
-// chat/sessions 的 hide/show 生命周期策略对齐。
+// CloseRequested 拦下转 hide——本页 webview 生命周期内只 load 一次，
+// hide/show 不重载页面。
 //
-// Task 1 范围：载入后 invoke("get_settings") 回填四项到 settings.html 的
-// 占位 DOM；不实现保存/控件交互（Task 2）。
-//
-// Task 2 接线点：
-// - `window.__ccPetsSettings.loadSettingsIntoDom()` —— 打开时回填
-//   （hide/show 生命周期下页面不重载，T2 若需重开刷新可复用）
-// - `applySettingsToDom(s)` —— 保存后同步渲染
-// - `Settings` 形状与 settings.html 的 DOM id 契约见下。
+// 数据流（单向广播）：本窗改动 → save_settings（持久化全四项）+ 对应事件：
+// - 皮肤        → skin-changed {skinId}        （pet 窗重载精灵，即时换肤）
+// - 大小        → pet-zoom-changed {zoom}      （pet 窗实时缩放+命中映射）
+// - 风格/透明度 → chat-appearance-changed {style, opacity}（chat 窗应用，
+//   v1.3.x 新增事件——四项设置 UI 已自气泡 ⚙ 面板迁入本窗）
+// 反向：本窗不监听任何回传；每次显示（重获焦点）时重新 get_settings 刷新
+// 控件，防止 hide/show 不重载页面导致的滞后显示。
 
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  clampOpacity,
+  clampPetZoom,
+  normalizePetSkin,
+  normalizeStyle,
+  type ThemeStyle,
+} from "./theme";
 
 /**
  * get_settings 返回形状 = src-tauri/src/settings.rs `Settings` 的 serde
- * 产物：petSkin 驼峰、pet_zoom 保持蛇形——历史字段名契约（chat ⚙ 与 pet
- * 页都按它消费），勿顺手统一。
+ * 产物：petSkin 驼峰、pet_zoom 保持蛇形——历史字段名契约（save_settings
+ * 入参用驼峰 petZoom，勿顺手统一）。
  */
 export interface Settings {
   style: string;
@@ -28,47 +36,199 @@ export interface Settings {
   pet_zoom: number;
 }
 
-/** 单个占位行回填；元素缺失静默跳过（骨架期间 DOM 契约允许漂移）。 */
-function setValue(id: string, text: string): void {
-  const el = document.getElementById(id);
-  if (el) el.textContent = text;
+// get_skins payload（src-tauri/src/skins.rs）：pet.json skins 映射，
+// id（= settings.petSkin 值）→ { spritesheetPath, displayName }。
+// 照搬 chat ⚙ 面板既有做法（get_skins 拉取，displayName 渲染芯片），
+// 当前 pet.json 实际只有两枚（像素猫/lynn），不新增动态拉取机制。
+interface SkinDefPayload {
+  spritesheetPath: string;
+  displayName: string;
 }
 
-/** 把四项设置渲染进占位 DOM（id 契约见 settings.html）。幂等，可重复调用。 */
-export function applySettingsToDom(s: Settings): void {
-  setValue("value-style", s.style);
-  setValue("value-opacity", s.opacity.toFixed(2));
-  setValue("value-pet-skin", s.petSkin);
-  setValue("value-pet-zoom", s.pet_zoom.toFixed(2));
+type SkinsPayload = Record<string, SkinDefPayload>;
+
+const styleChips = Array.from(
+  document.querySelectorAll<HTMLButtonElement>(".style-chips .chip"),
+);
+const skinChipsEl = document.getElementById("skin-chips") as HTMLElement;
+const alphaRange = document.getElementById("alpha") as HTMLInputElement;
+const alphaValue = document.getElementById("alpha-value") as HTMLElement;
+const petZoomRange = document.getElementById("pet-zoom") as HTMLInputElement;
+const petZoomValue = document.getElementById("pet-zoom-value") as HTMLElement;
+
+// debug.log 时间线（与 chat/sessions 窗同款 logLine）。
+function logLine(text: string): void {
+  void invoke("append_debug", { line: text }).catch(() => {});
 }
 
-/**
- * 读取当前设置并回填 DOM。读取失败不抛出（骨架只读展示，宁可空着别炸
- * 窗口），返回 null 供调用方判别；成功返回读到的值。
- */
-export async function loadSettingsIntoDom(): Promise<Settings | null> {
+let currentStyle: ThemeStyle = "c";
+let currentOpacity = 0.92;
+let currentSkin = "default";
+let currentPetZoom = 1.0;
+
+function syncStyleChips(): void {
+  for (const chip of styleChips) {
+    chip.classList.toggle("active", chip.dataset.style === currentStyle);
+  }
+}
+
+function syncSkinChips(): void {
+  for (const chip of skinChipsEl.querySelectorAll<HTMLButtonElement>(".chip")) {
+    chip.classList.toggle("active", chip.dataset.skin === currentSkin);
+  }
+}
+
+// 把四项设置应用到控件（normalize/clamp 兜手改的 settings.json）。
+// 幂等，启动载入与 show 后重读共用。
+function applySettingsToControls(s: Settings): void {
+  currentStyle = normalizeStyle(s.style);
+  currentOpacity = clampOpacity(s.opacity);
+  currentPetZoom = clampPetZoom(s.pet_zoom);
+  currentSkin = normalizePetSkin(s.petSkin);
+  alphaRange.value = String(currentOpacity);
+  alphaValue.textContent = String(currentOpacity);
+  petZoomRange.value = String(currentPetZoom);
+  petZoomValue.textContent = currentPetZoom.toFixed(2);
+  syncStyleChips();
+  syncSkinChips();
+}
+
+// 读失败时的兜底展示（= settings.rs 默认值），窗口不空着打开。
+function applyDefaultsToControls(): void {
+  applySettingsToControls({
+    style: "c",
+    opacity: 0.92,
+    petSkin: "default",
+    pet_zoom: 1.0,
+  });
+}
+
+// 持久化当前四项；保存失败保留已应用的界面并落一行日志。
+function saveSettings(): void {
+  invoke("save_settings", {
+    style: currentStyle,
+    opacity: currentOpacity,
+    petSkin: currentSkin,
+    petZoom: currentPetZoom,
+  }).catch((err: unknown) => {
+    console.error("save_settings failed:", err);
+    logLine(`[settings] save_settings failed: ${String(err)}`);
+  });
+}
+
+// 风格/透明度统一走 chat-appearance-changed（chat 窗监听应用）。
+function emitChatAppearance(): void {
+  void emit("chat-appearance-changed", {
+    style: currentStyle,
+    opacity: currentOpacity,
+  }).catch((err: unknown) => {
+    console.error("chat-appearance-changed emit failed:", err);
+    logLine(`[settings] chat-appearance-changed emit failed: ${String(err)}`);
+  });
+}
+
+// ===== 风格芯片：点选即保存 + 广播 =====
+
+for (const chip of styleChips) {
+  chip.addEventListener("click", () => {
+    currentStyle = normalizeStyle(chip.dataset.style);
+    syncStyleChips();
+    saveSettings();
+    emitChatAppearance();
+  });
+}
+
+// ===== 透明度滑杆：input 实时广播（chat 窗拖动全程平滑预览，与旧 ⚙ 滑杆
+// 同手感），change 才 save（持久化）=====
+alphaRange.addEventListener("input", () => {
+  currentOpacity = clampOpacity(Number(alphaRange.value));
+  alphaValue.textContent = String(currentOpacity);
+  emitChatAppearance();
+});
+alphaRange.addEventListener("change", saveSettings);
+
+// ===== 大小滑杆：input 实时广播 pet-zoom-changed（pet 窗实时 transform
+// 缩放并同步命中映射），change 才 save（pet_zoom 持久化）=====
+petZoomRange.addEventListener("input", () => {
+  currentPetZoom = clampPetZoom(Number(petZoomRange.value));
+  petZoomValue.textContent = currentPetZoom.toFixed(2);
+  void emit("pet-zoom-changed", { zoom: currentPetZoom }).catch(
+    (err: unknown) => {
+      console.error("pet-zoom-changed emit failed:", err);
+      logLine(`[settings] pet-zoom-changed emit failed: ${String(err)}`);
+    },
+  );
+});
+petZoomRange.addEventListener("change", saveSettings);
+
+// ===== 皮肤芯片（照搬 chat ⚙ 既有链路）=====
+
+// 点选皮肤：本地态更新 + save（持久化 petSkin）+ 全局广播 skin-changed——
+// pet 窗监听后重新 loadPet 并重启精灵动画，换肤即时生效、无需重启。
+function selectSkin(id: string): void {
+  if (id === currentSkin) return;
+  currentSkin = id;
+  syncSkinChips();
+  saveSettings();
+  void emit("skin-changed", { skinId: id }).catch((err: unknown) => {
+    console.error("skin-changed emit failed:", err);
+    logLine(`[settings] skin-changed emit failed: ${String(err)}`);
+  });
+}
+
+// 芯片从 get_skins 动态渲染；displayName 取 pet.json skins 映射，空则退回 id。
+function renderSkinChips(skins: SkinsPayload): void {
+  skinChipsEl.textContent = "";
+  for (const [id, def] of Object.entries(skins)) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.dataset.skin = id;
+    chip.textContent = def.displayName || id;
+    chip.addEventListener("click", () => selectSkin(id));
+    skinChipsEl.appendChild(chip);
+  }
+  syncSkinChips();
+}
+
+void invoke<SkinsPayload>("get_skins")
+  .then((skins) => {
+    // 可用集在前端判断：settings 里的 petSkin 若不在 skins 集 → 回 default
+    //（Rust 侧刻意不校验，见 settings.rs）。
+    if (Object.keys(skins).length > 0 && !skins[currentSkin]) {
+      currentSkin = "default";
+    }
+    renderSkinChips(skins);
+  })
+  .catch((err: unknown) => {
+    // get_skins 失败（pet.json 读不出）：退一枚 default 芯片，面板仍可用。
+    console.error("get_skins failed:", err);
+    logLine(`[settings] get_skins failed: ${String(err)}`);
+    renderSkinChips({
+      default: { spritesheetPath: "spritesheet.png", displayName: "默认" },
+    });
+  });
+
+// ===== 载入与 show 后重读 =====
+
+// hide/show 不重载页面：每次显示（= 重获焦点，chat/sessions/main 窗同款
+// onFocusChanged 感知）重新 get_settings 刷新控件，防上一轮改动滞后。
+// 创建时机的 focused=true 事件先于本监听注册（chat.ts 同款踩坑），所以启动
+// 仍走显式载入；监听只负责后续轮次。
+async function reloadSettings(): Promise<void> {
   try {
-    const s = await invoke<Settings>("get_settings");
-    applySettingsToDom(s);
-    return s;
+    applySettingsToControls(await invoke<Settings>("get_settings"));
   } catch (err) {
+    // 重读失败保留当前控件（瞬时失败不该重置用户视图），只留一行日志。
     console.error("get_settings failed:", err);
-    return null;
+    logLine(`[settings] get_settings failed: ${String(err)}`);
   }
 }
 
-// T2 接线点：全局暴露（module scope 里 T2 的内联脚本/控件绑定取不到
-// export，挂 window 才跨模块可达）。
-declare global {
-  interface Window {
-    __ccPetsSettings: {
-      applySettingsToDom: typeof applySettingsToDom;
-      loadSettingsIntoDom: typeof loadSettingsIntoDom;
-    };
-  }
-}
-window.__ccPetsSettings = { applySettingsToDom, loadSettingsIntoDom };
+void getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+  if (focused) void reloadSettings();
+});
 
-// 载入即回填：窗口创建（visible true）与 hide 后再 show 都走这条——
-// hide/show 不重载页面，重复调用幂等无害。
-void loadSettingsIntoDom();
+// 载入即回填：先落默认值（读不出来窗口也不空板），get_settings 到达后覆盖。
+applyDefaultsToControls();
+void reloadSettings();

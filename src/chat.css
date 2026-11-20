@@ -4,7 +4,8 @@
    - theme-a 漫画气泡 (dark, tailed assistant bubbles + sprite avatar)
    - theme-b 极简 IM (flat dark, pill bubbles)
    The window background multiplies --win-alpha (0.3–1.0) so the settings
-   slider fades the whole window smoothly and continuously. */
+   window's opacity slider (v1.3.x: 原生设置窗口) fades the whole window
+   smoothly and continuously. */
 
 * {
   box-sizing: border-box;
@@ -655,7 +656,8 @@ body.theme-c #send:hover {
   background: #4a5a7b;
 }
 
-/* ===== Settings panel (v1.1) ===== */
+/* ===== Settings panel（v1.1 引入；v1.3.x 起四项设置迁入原生设置窗口，
+   本面板只剩清屏/重开两按钮）===== */
 
 #settings-panel {
   position: absolute;
@@ -696,94 +698,10 @@ body.theme-c #settings-panel {
   color: #3a4a6b;
 }
 
-.style-chips {
-  display: flex;
-  gap: 4px;
-}
-
-.chip {
-  flex: 1;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 3px 4px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  opacity: 0.7;
-  cursor: pointer;
-}
-
-.chip:hover {
-  opacity: 1;
-}
-
-.chip.active {
-  border-color: currentColor;
-  opacity: 1;
-  font-weight: 600;
-}
-
-/* 皮肤芯片组（v1.2 多皮肤）：复用 .chip 家族样式；容器可换行——皮肤数随
-   导入增长，不像主题芯片固定三枚，所以不平均拉伸（flex:none + 允许 wrap）。 */
-.skin-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.skin-label {
-  flex: none;
-  opacity: 0.6;
-}
-
-.skin-chips {
-  flex: 1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.skin-chips .chip {
-  flex: none;
-  min-width: 3em;
-}
-
-.alpha-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-#alpha,
-#pet-zoom {
-  flex: 1;
-  margin: 0;
-}
-
-body.theme-a #alpha,
-body.theme-a #pet-zoom {
-  accent-color: #7c9cd0;
-}
-
-body.theme-b #alpha,
-body.theme-b #pet-zoom {
-  accent-color: #4a7dc9;
-}
-
-body.theme-c #alpha,
-body.theme-c #pet-zoom {
-  accent-color: #3a4a6b;
-}
-
-#alpha-value {
-  min-width: 2.8em;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
 /* Panel actions (acceptance-fix-10): 清屏 / 重开会话 — same chip-family
    styling so they inherit the theme ink; armed state for the inline
-   restart confirmation highlights the button instead of popping a dialog. */
+   restart confirmation highlights the button instead of popping a dialog.
+   （v1.3.x：四项设置控件已迁入原生设置窗口，相关样式随之移除） */
 .panel-actions {
   display: flex;
   gap: 4px;
