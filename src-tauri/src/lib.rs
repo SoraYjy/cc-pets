@@ -28,12 +28,12 @@ mod debug_log {
         dirs::data_dir()
     }
 
-    /// 日志文件路径：`<log_dir>/lynn-widget/debug.log`；log 目录不可用则退
-    /// `home_dir()/.lynn-widget/debug.log`；home 也没有就放弃写日志。
+    /// 日志文件路径：`<log_dir>/cc-pets/debug.log`；log 目录不可用则退
+    /// `home_dir()/.cc-pets/debug.log`；home 也没有就放弃写日志。
     fn path() -> Option<PathBuf> {
         let base = platform_log_dir()
-            .or_else(|| dirs::home_dir().map(|h| h.join(".lynn-widget")))?;
-        Some(base.join("lynn-widget").join("debug.log"))
+            .or_else(|| dirs::home_dir().map(|h| h.join(".cc-pets")))?;
+        Some(base.join("cc-pets").join("debug.log"))
     }
 
     /// 带本地时间戳追加一行到 debug 日志；目录自动创建，写失败静默——

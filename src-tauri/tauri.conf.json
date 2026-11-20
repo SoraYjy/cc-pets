@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Lynn",
+  "productName": "cc-pets",
   "version": "0.1.0",
-  "identifier": "com.sora.lynn",
+  "identifier": "com.sora.cc-pets",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "pet",
-        "title": "Lynn",
+        "title": "cc-pets",
         "width": 288,
         "height": 312,
         "transparent": true,

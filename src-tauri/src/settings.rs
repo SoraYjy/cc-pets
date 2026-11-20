@@ -59,11 +59,11 @@ fn clamp_pet_zoom(z: f32) -> f32 {
     z.clamp(PET_ZOOM_MIN, PET_ZOOM_MAX)
 }
 
-/// 设置文件路径：`~/.lynn-widget/settings.json`（父目录在 save 时创建）。
+/// 设置文件路径：`~/.cc-pets/settings.json`（父目录在 save 时创建）。
 pub fn settings_path() -> PathBuf {
     dirs::home_dir()
         .expect("home dir must exist")
-        .join(".lynn-widget")
+        .join(".cc-pets")
         .join("settings.json")
 }
 

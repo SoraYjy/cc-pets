@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    lynn_widget_lib::run()
+    cc_pets_lib::run()
 }
