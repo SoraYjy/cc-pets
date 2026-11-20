@@ -1,6 +1,6 @@
 [package]
 name = "cc-pets"
-version = "0.1.0"
+version = "1.0.0"
 description = "Lynn desktop pet for Claude Code sessions"
 authors = ["Sora"]
 edition = "2024"
