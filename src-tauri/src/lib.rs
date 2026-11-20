@@ -106,7 +106,15 @@ pub fn run() {
 
             // 应用菜单（macOS 菜单栏）：cc-pets（设置… ⌘,）/ 编辑 / 窗口。
             // 「设置…」的窗口打开逻辑在 Rust 侧（app_menu.rs），菜单事件同点分发。
-            app_menu::install(app)?;
+            // 菜单构建失败降级为日志，不传播为启动失败（终审 M1：与
+            // app_menu.rs「窗口创建失败 log+return 不崩应用」同口径）——
+            // 桌宠本体不依赖菜单栏，无菜单也照常启动（「设置…」入口丢失，
+            // 气泡窗口仍可点猫唤起）。
+            if let Err(e) = app_menu::install(app) {
+                let msg = format!("app_menu install failed: {e}");
+                eprintln!("{msg}");
+                log_line(&msg);
+            }
 
             // watcher 轮询线程：独立 std::thread，不阻塞主线程；
             // 停止来源 = AppState.poller_stop（退出钩子置真）

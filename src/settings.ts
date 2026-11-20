@@ -66,6 +66,21 @@ let currentOpacity = 0.92;
 let currentSkin = "default";
 let currentPetZoom = 1.0;
 
+// get_skins 结果缓存（终审 Nit-2）：applySettingsToControls 校验 petSkin
+// 可用性用。get_skins 与 get_settings 到达顺序不定——启动路径只在
+// get_skins.then 里校验一次，晚到的 get_settings 若带回手改的非法 petSkin
+// 会出现「芯片无高亮」；缓存到位后任何一次回填都做可用性兜底。
+let skinsCache: SkinsPayload | null = null;
+
+// petSkin 可用性兜底：集合未知（get_skins 未到）或为空时不判；不在集内 →
+// 回 default（Rust 侧刻意不校验可用性，见 settings.rs）。
+function resolveAvailableSkin(id: string): string {
+  if (skinsCache && Object.keys(skinsCache).length > 0 && !skinsCache[id]) {
+    return "default";
+  }
+  return id;
+}
+
 function syncStyleChips(): void {
   for (const chip of styleChips) {
     chip.classList.toggle("active", chip.dataset.style === currentStyle);
@@ -84,7 +99,7 @@ function applySettingsToControls(s: Settings): void {
   currentStyle = normalizeStyle(s.style);
   currentOpacity = clampOpacity(s.opacity);
   currentPetZoom = clampPetZoom(s.pet_zoom);
-  currentSkin = normalizePetSkin(s.petSkin);
+  currentSkin = resolveAvailableSkin(normalizePetSkin(s.petSkin));
   alphaRange.value = String(currentOpacity);
   alphaValue.textContent = String(currentOpacity);
   petZoomRange.value = String(currentPetZoom);
@@ -193,8 +208,10 @@ function renderSkinChips(skins: SkinsPayload): void {
 
 void invoke<SkinsPayload>("get_skins")
   .then((skins) => {
+    skinsCache = skins; // 供 applySettingsToControls 做可用性兜底（Nit-2）
     // 可用集在前端判断：settings 里的 petSkin 若不在 skins 集 → 回 default
-    //（Rust 侧刻意不校验，见 settings.rs）。
+    //（Rust 侧刻意不校验，见 settings.rs）。此分支兜「get_settings 先到、
+    // 当时缓存未建立」的顺序；skins 后到时当前选中值在这里复查。
     if (Object.keys(skins).length > 0 && !skins[currentSkin]) {
       currentSkin = "default";
     }
