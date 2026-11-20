@@ -351,25 +351,20 @@ function startCursorPoll(): void {
     void (async () => {
       const busy = pointerPressed || dragging;
       const ignore = decideCursorIgnore(await probeCursorAlpha(), busy, ALPHA_THRESHOLD);
-      setIgnoreMouse(ignore, "poll");
+      setIgnoreMouse(ignore);
     })().catch((err: unknown) => {
       // Fail open: any probe failure returns the window to clickable.
       console.error("cursor poll failed:", err);
-      setIgnoreMouse(false, "poll-error");
+      setIgnoreMouse(false);
     });
   }, 100);
 }
 
 function setIgnoreMouse(
   ignore: boolean,
-  source: "move" | "poll" | "poll-error" | "drag" = "move",
 ): void {
   if (ignoringMouse === ignore) return; // only flip on state change
   ignoringMouse = ignore;
-  // 诊断钉：每次翻转落日志，验收时可确认失焦态的翻转确实来自 poll。
-  void invoke("append_debug", { line: `hit-test: ignore=${ignore} via ${source}` }).catch(
-    () => {},
-  );
   getCurrentWindow()
     .setIgnoreCursorEvents(ignore)
     .catch((err: unknown) => {
@@ -386,12 +381,11 @@ function applyHitTesting(e: MouseEvent): void {
   if (!sheetAlpha) return;
   // 手势进行中钉住可点：拖拽绝不能丢窗口；按下中翻穿透会吃掉 mouseup。
   if (pointerPressed || dragging) {
-    setIgnoreMouse(false, "drag");
+    setIgnoreMouse(false);
     return;
   }
   setIgnoreMouse(
     decideCursorIgnore(alphaAt(e.clientX, e.clientY), false, ALPHA_THRESHOLD),
-    "move",
   );
 }
 
@@ -544,7 +538,7 @@ function setupListeners(): void {
     // 给 key 窗口）——拖拽中意外失焦（Spotlight/别的应用抢焦点）时事件流会
     // 断，手势状态不能卡死在 dragging，立即收尾。
     if (!focused) {
-      if (dragging) endSelfDrawnDrag("blur");
+      if (dragging) endSelfDrawnDrag();
       // 失焦后 mouseup 永远不会到达——按下态一并清掉，手势钉不能卡死。
       pointerPressed = false;
       return;
@@ -1204,18 +1198,6 @@ let dragLastApplied: Physical | null = null;
 // 按下——陈旧请求的结果不得写进新一轮拖拽的状态。
 let dragToken = 0;
 
-// 拖拽诊断钉（「完全拖不动」取证）：每手势统计 mousemove 送达数与最大位移、
-// 帧成功/失败计数——mouseup 时一次性落日志，直接区分「事件流断」（手势
-// moves=0，阈值永不越、释放变点击）与「IPC 断」（moves>0 而 setPosition
-// 全拒）。抓取/首帧/结束同样落点，全链路可见。
-let gMoves = 0; // 本手势送达的 mousemove 数
-let gMaxDist = 0; // 本手势按下点→当前点最大位移（逻辑 px）
-let dFirstMoveOk = false; // 首次 setPosition 成功（每拖拽记一次）
-let dFrameOk = 0;
-let dFrameFail = 0;
-let dBoundsLogged = false; // 可见区实测（每拖拽记一次）
-let dClampLogged = false; // 钳制介入点（每拖拽记一次）
-
 // currentMonitor() → 拖拽钳制用的可见区矩形（物理 px）。主路 workArea =
 // NSScreen.visibleFrame（菜单栏下缘为顶；tauri-runtime-wry 的 MonitorExt
 // 在 macOS 上正是这么算的）。workArea 缺失/退化时按简报裁决回退：完整
@@ -1264,17 +1246,6 @@ function dragTick(): void {
         const z = clampPetZoom(petZoom);
         dragSf = mon?.scaleFactor ?? 2;
         dragHeadOffsetPx = (ELEM_Y + CELL_H * (1 - z) + cellHeadGapPx * z) * dragSf;
-        if (!dBoundsLogged) {
-          dBoundsLogged = true;
-          const raw = mon
-            ? `pos=(${mon.position.x},${mon.position.y}) size=${mon.size.width}x${mon.size.height} sf=${mon.scaleFactor} workArea=${
-                mon.workArea
-                  ? `(${mon.workArea.position.x},${mon.workArea.position.y}) ${mon.workArea.size.width}x${mon.workArea.size.height}`
-                  : "none"
-              }`
-            : "monitor=null";
-          debug(`drag bounds ${raw} -> clamp box=(${dragBounds.x},${dragBounds.y},${dragBounds.width},${dragBounds.height}) headOff=${dragHeadOffsetPx} gap=${cellHeadGapPx}`);
-        }
       }
     }
     if (dragGrabOffset && dragWinSize && dragBounds) {
@@ -1315,31 +1286,18 @@ function dragTick(): void {
       ) {
         // IPC 边界取整：物理坐标传 i32，浮点直传会被参数校验整帧拒绝。
         const rounded = roundPhysical({ x: target.x, y: split.winY });
-        if (!dClampLogged && (rounded.y !== split.winY || rounded.y <= 0)) {
-          dClampLogged = true;
-          debug(
-            `drag top zone: cursor=(${cursor.x},${cursor.y}) rawY=${target.y} winY=${rounded.y} shift=${split.shift}`,
-          );
-        }
         await getCurrentWindow().setPosition(new PhysicalPosition(rounded.x, rounded.y));
         dragLastApplied = rounded; // 落账在成功之后：reject 不记，瞬态失败不丢帧
         if (shiftChanged) {
           elemYShift = split.shift;
           applySpriteShift(); // 精灵窗内上滑/复位（命中映射 alphaAt 读同一偏移）
         }
-        dFrameOk++;
-        if (!dFirstMoveOk) {
-          dFirstMoveOk = true;
-          debug(
-            `drag first move ok target=(${rounded.x},${rounded.y}) shift=${elemYShift} hidden=${document.hidden}`,
-          );
-        }
       }
     }
   })()
     .catch((err: unknown) => {
-      dFrameFail++;
-      if (dFrameFail <= 3) debug(`drag frame FAILED (#${dFrameFail}): ${errorText(err)}`);
+      // 故障路径保留日志（应恒为 0 体量）；成功路径零噪音。
+      debug(`drag frame FAILED: ${errorText(err)}`);
     })
     .finally(() => {
       if (dragging) {
@@ -1364,7 +1322,6 @@ function beginSelfDrawnDrag(): void {
   dragging = true;
   const token = ++dragToken;
   const win = getCurrentWindow();
-  debug(`drag begin hidden=${document.hidden}`);
   // 竞态取舍（报告已注明）：cursorPosition 与 outerPosition 异步取回前
   // 光标可能已移动——以「取回时刻」的差值为准，从取回那一刻起抓取点跟随
   // 光标（窗位 = 光标 − 抓取偏移），不试图回放按下瞬间的几何。
@@ -1380,18 +1337,10 @@ function beginSelfDrawnDrag(): void {
     dragCursor0Y = cursor.y;
     dragWin0Y = origin.y;
     dragWinSize = { width: size.width, height: size.height };
-    dFirstMoveOk = false;
-    dFrameOk = 0;
-    dFrameFail = 0;
-    dBoundsLogged = false;
-    dClampLogged = false;
-    debug(
-      `drag grab ok d=(${dragGrabOffset.x},${dragGrabOffset.y}) win=${size.width}x${size.height}`,
-    );
   })().catch((err: unknown) => {
     // 抓取失败 → 拖拽作废回安全态：宁可拖不动，不可手势卡死
     debug(`drag grab FAILED: ${errorText(err)}`);
-    if (token === dragToken) endSelfDrawnDrag("grab-fail");
+    if (token === dragToken) endSelfDrawnDrag();
   });
   dragBounds = null;
   dragWinSize = null;
@@ -1400,12 +1349,7 @@ function beginSelfDrawnDrag(): void {
   ensureDragLoop();
 }
 
-function endSelfDrawnDrag(reason: string = "mouseup"): void {
-  debug(
-    `drag end (${reason}) ok=${dFrameOk} fail=${dFrameFail} last=${
-      dragLastApplied ? `(${dragLastApplied.x},${dragLastApplied.y})` : "none"
-    }`,
-  );
+function endSelfDrawnDrag(): void {
   dragging = false;
   dragGrabOffset = null;
   dragWinSize = null;
@@ -1430,8 +1374,6 @@ function setupPointerInteractions(): void {
     if (e.button !== 0) return;
     pointerPressed = true;
     dragging = false;
-    gMoves = 0;
-    gMaxDist = 0;
     x0 = e.clientX;
     y0 = e.clientY;
     t0 = performance.now();
@@ -1439,11 +1381,8 @@ function setupPointerInteractions(): void {
 
   document.addEventListener("mousemove", (e: MouseEvent) => {
     applyHitTesting(e); // alpha probe runs on every move (see hit-testing block)
-    if (!pointerPressed) return;
+    if (!pointerPressed || dragging) return;
     const dist = Math.hypot(e.clientX - x0, e.clientY - y0);
-    gMoves++;
-    if (dist > gMaxDist) gMaxDist = dist;
-    if (dragging) return;
     if (dist > DRAG_THRESHOLD_PX) {
       beginSelfDrawnDrag(); // v1.3 Task 2: 自绘拖拽取代 startDragging
     }
@@ -1452,9 +1391,8 @@ function setupPointerInteractions(): void {
   document.addEventListener("mouseup", (e: MouseEvent) => {
     if (!pointerPressed) return;
     pointerPressed = false;
-    const dist = Math.hypot(e.clientX - x0, e.clientY - y0);
-    debug(`gesture end moves=${gMoves} maxDist=${gMaxDist.toFixed(0)} endDist=${dist.toFixed(0)}`);
     if (!dragging && e.button === 0) {
+      const dist = Math.hypot(e.clientX - x0, e.clientY - y0);
       const dt = performance.now() - t0;
       if (dist <= DRAG_THRESHOLD_PX && dt < CLICK_MAX_MS) {
         onClickPet().catch((err: unknown) =>
