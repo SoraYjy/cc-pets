@@ -1,16 +1,17 @@
 //! Chat 运行时：spawn 常驻 `claude` CLI（双向 stream-json），把 stdout 行解析
 //! 成前端事件，把用户输入写进 stdin。多轮复用同一进程，Done 不杀进程。
 //!
-//! 纯逻辑（[`build_command`] / [`parse_chat_line`]）不触碰进程与 IO，全部单测；
+//! 纯逻辑（[`parse_chat_line`]；命令构造迁至 [`crate::cc_env::build_command`]，
+//! CLI/目录形态探测见 [`crate::cc_env`]）不触碰进程与 IO，全部单测；
 //! [`StderrRing`] 单测覆盖丢最旧/空快照；运行时（[`spawn_chat`] / [`chat_send`]
 //! / [`chat_stop`]）属集成行为，Task 9 人工验收。解析全程宽松，无 panic 路径。
 
 use crate::AppState;
+use crate::cc_env::{build_command, resolve_chat_cli};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ExitStatus};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -18,32 +19,6 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 // ===== 纯逻辑 =====
-
-/// 构造 `claude` CLI 命令：args 顺序即协议，env 剥离嵌套检测，
-/// 三向管道，工作目录 = 调用方给定目录（spawn 处传用户主目录）。
-pub fn build_command(workdir: &Path) -> Command {
-    let mut cmd = Command::new("claude");
-    cmd.args([
-        "--output-format",
-        "stream-json",
-        "--input-format",
-        "stream-json",
-        "--permission-prompt-tool",
-        "stdio",
-        "--replay-user-messages",
-        "--verbose",
-        "--permission-mode",
-        "acceptEdits",
-    ]);
-    // 嵌套检测剥离：widget 里 spawn 的 claude 不许被当成嵌套会话拒启。
-    // （若 Task 9 实测仍拒启，候选还有 CLAUDE_CODE_ENTRYPOINT，先不加。）
-    cmd.env_remove("CLAUDECODE");
-    cmd.current_dir(workdir);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd
-}
 
 /// 一行 stream-json 的解析结果。
 #[derive(Debug, Clone, PartialEq)]
@@ -300,9 +275,30 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
     let _ = stop_internal(state);
 
     let home = dirs::home_dir().ok_or_else(|| "home dir not found".to_string())?;
-    let mut child = build_command(&home)
+    // CLI 形态解析：变体环境 PATH 上缺 cfuse 时落日志原地失败，不静默
+    // 回退裸 claude（连不上 antcc 网关，回退只会把失败藏得更深）。
+    let cli = match resolve_chat_cli(&home) {
+        Ok(cli) => cli,
+        Err(e) => {
+            crate::log_line(&e);
+            return Err(e);
+        }
+    };
+    // workdir 落目录放调用方（resolve 保持纯判定）：变体 workdir 是
+    // ~/.cc-pets（cfuse 禁 $HOME 作工作目录）；原生 workdir=home 已存在，
+    // create_dir_all 幂等。失败落日志并原地返回——目录落不出，spawn 只会
+    // 以更难读的「No such file or directory」失败。
+    if let Err(e) = std::fs::create_dir_all(&cli.workdir) {
+        let msg = format!(
+            "failed to create chat workdir {}: {e}",
+            cli.workdir.display()
+        );
+        crate::log_line(&msg);
+        return Err(msg);
+    }
+    let mut child = build_command(&cli)
         .spawn()
-        .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        .map_err(|e| format!("failed to spawn {}: {e}", cli.program))?;
 
     let pid = child.id();
     let stdin = child.stdin.take();
@@ -471,38 +467,8 @@ pub fn chat_stop(state: State<'_, AppState>) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_command_strips_claudecode_env() {
-        let home = dirs::home_dir().expect("home dir must exist");
-        let cmd = build_command(&home);
-        // 注：stable std 无 Command::get_env（单键 getter 未稳定），
-        // 用 get_envs() 验证显式 remove 项 ("CLAUDECODE", None)。
-        let removed = cmd
-            .get_envs()
-            .any(|(k, v)| k == "CLAUDECODE" && v.is_none());
-        assert!(removed, "CLAUDECODE must be env_remove'd");
-        assert_eq!(cmd.get_program().to_string_lossy(), "claude");
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            args,
-            vec![
-                "--output-format",
-                "stream-json",
-                "--input-format",
-                "stream-json",
-                "--permission-prompt-tool",
-                "stdio",
-                "--replay-user-messages",
-                "--verbose",
-                "--permission-mode",
-                "acceptEdits",
-            ]
-        );
-        assert_eq!(cmd.get_current_dir(), Some(home.as_path()));
-    }
+    // 命令构造测试（test_command_strips_claudecode_env）随 build_command
+    // 迁至 cc_env.rs（原生形态断言原样保持，另补变体前缀形态钉）。
 
     #[test]
     fn test_parse_init() {
