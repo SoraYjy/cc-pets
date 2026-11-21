@@ -47,10 +47,12 @@ npm run tauri build   # 打包
 
 ### 公司环境验收锚点
 
+前置：聊天 spawn 失败先查 debug.log 的 variant chat cli 报错——从 Finder/Dock 启动 .app 继承的 PATH 可能不含 `cfuse`（终端启动则完整）；GUI 启动后聊天起不来，先核对此项。
+
 1. **动画联动**：猫随变体会话 busy/idle 实时切换动画
 2. **完成通知**：回合完成弹系统通知，带结果摘要
-3. **面板过滤**：会话面板列出变体会话，且不含 widget 自身的聊天会话
-4. **退出干净**：聊天 spawn 后完全退出应用，`pgrep -fl` 查无孤儿引擎进程（`cfuse`/engine 均无残留）
+3. **面板过滤**：会话面板列出变体会话，且不含 widget 自身的聊天会话。判读时机：init 后 ≥6s（引擎 pid 补登窗口）再判读——过早面板可能短暂含自身聊天会话，非失败
+4. **退出干净**：聊天 spawn 后完全退出应用，`pgrep -fl "engine/bin/claude"` 查无孤儿引擎进程（全命令行匹配引擎真身路径，不误伤其它 claude 会话）
 
 ## 人工验收清单
 

@@ -11,6 +11,7 @@ use crate::cc_env::{build_command, claude_data_dir, resolve_chat_cli, scan_regis
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ExitStatus};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -199,6 +200,41 @@ const ENGINE_PID_SCAN_ATTEMPTS: u32 = 15;
 /// 完整性，组杀按进程组兜底覆盖引擎，超限放弃无安全后果。
 const ENGINE_PID_SCAN_INTERVAL: Duration = Duration::from_millis(400);
 
+/// 补登单次尝试结果。
+#[derive(Debug, Clone, PartialEq)]
+enum EngineBackfill {
+    /// 注册表命中且探活通过：已登记（self_pids + 引擎槽）。
+    Registered(u32),
+    /// 注册表命中但进程已死：不登记，轮询应终止（死条目不会消失，继续
+    /// 扫只会重复命中同一死 pid）。
+    DeadEntry(u32),
+    /// 注册表未命中（本轮注册表尚未落 / 目录缺失等）。
+    Miss,
+}
+
+/// 补登的单次尝试（可测）：注册表反查 → 探活插入门 → 登记。注册表条目
+/// 死后不删——stop/restart 后旧补登线程会稳定命中死引擎条目，故命中后先
+/// `kill(pid, 0)` 探活（复用 [`crate::watcher::pid_alive`]，非 unix 恒真
+/// 保持旧行为），存活才写入 self_pids 与引擎槽；探活失败返回
+/// [`EngineBackfill::DeadEntry`] 交调用方终止轮询。不落日志（调用方按
+/// 结果记，单测不污染 debug.log）。
+fn backfill_engine_pid_once(
+    sessions_dir: &Path,
+    session_id: &str,
+    pids: &Mutex<std::collections::HashSet<u32>>,
+    engine_slot: &Mutex<Option<u32>>,
+) -> EngineBackfill {
+    let Some(ep) = scan_registry_for_session(sessions_dir, session_id) else {
+        return EngineBackfill::Miss;
+    };
+    if !crate::watcher::pid_alive(ep) {
+        return EngineBackfill::DeadEntry(ep);
+    }
+    pids.lock().expect("self_pids poisoned").insert(ep);
+    *engine_slot.lock().expect("engine_pid poisoned") = Some(ep);
+    EngineBackfill::Registered(ep)
+}
+
 /// 进程退出统一落盘点（EOF 收尸与 chat_stop 两处共用）：先记退出码
 /// （信号死/拿不到写 unknown）；随后对 stderr 线程做有界收尾等待——
 /// kill+wait 与 stdout EOF 都不保证 stderr 线程已把残行 push 进环，收不到
@@ -346,11 +382,16 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
-        // 半启动失败：不留僵尸 claude
-        crate::log_line("chat spawn aborted: claude spawned without piped stdio");
+        // 半启动失败：不留僵尸进程（文案随 cli.program 参数化——变体环境
+        // 这里是 cfuse，写死 claude 会误导排查）
+        let msg = format!(
+            "chat spawn aborted: {} spawned without piped stdio",
+            cli.program
+        );
+        crate::log_line(&msg);
         let _ = child.kill();
         let _ = child.wait();
-        return Err("claude spawned without piped stdio".to_string());
+        return Err(msg);
     };
 
     state
@@ -417,17 +458,26 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
                     let pids_for_engine = Arc::clone(&pids);
                     std::thread::spawn(move || {
                         for _ in 0..ENGINE_PID_SCAN_ATTEMPTS {
-                            match scan_registry_for_session(&dir, &sid) {
-                                Some(ep) => {
+                            match backfill_engine_pid_once(
+                                &dir,
+                                &sid,
+                                &pids_for_engine,
+                                &engine_slot,
+                            ) {
+                                EngineBackfill::Registered(ep) => {
                                     crate::log_line(&format!("engine pid backfilled: {ep}"));
-                                    pids_for_engine
-                                        .lock()
-                                        .expect("self_pids poisoned")
-                                        .insert(ep);
-                                    *engine_slot.lock().expect("engine_pid poisoned") = Some(ep);
                                     break;
                                 }
-                                None => std::thread::sleep(ENGINE_PID_SCAN_INTERVAL),
+                                EngineBackfill::DeadEntry(ep) => {
+                                    crate::log_line(&format!(
+                                        "engine pid {ep} in registry but not alive; \
+                                         stop polling"
+                                    ));
+                                    break;
+                                }
+                                EngineBackfill::Miss => {
+                                    std::thread::sleep(ENGINE_PID_SCAN_INTERVAL)
+                                }
                             }
                         }
                     });
@@ -586,6 +636,61 @@ mod tests {
             ),
             ChatEvent::Ignored
         );
+    }
+
+    // ---- 引擎 pid 补登探活插入门 ----
+
+    /// 造一个「确定已死」的真实 pid（同 watcher::tests::spawn_dead_pid 口径）：
+    /// spawn 立即退出的子进程并 wait 收尸，wait 后短时间不被复用，测试窗口
+    /// 内 kill-0 稳定失败。
+    fn spawn_dead_pid() -> u32 {
+        let mut child = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn dead-pid helper (sleep 0)");
+        let pid = child.id();
+        let _ = child.wait();
+        pid
+    }
+
+    /// 造注册表 fixture：`<dir>/sessions/<pid>.json` 指向给定 session_id。
+    fn registry_fixture(dir: &Path, pid: u32, sid: &str) {
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"sessionId":"{sid}"}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_backfill_alive_entry_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = std::process::id(); // 活测用测试进程自身 pid（同 watcher 活测口径）
+        registry_fixture(dir.path(), me, "s-live");
+        let pids: Mutex<std::collections::HashSet<u32>> = Mutex::new(std::collections::HashSet::new());
+        let slot: Mutex<Option<u32>> = Mutex::new(None);
+        let out = backfill_engine_pid_once(&dir.path().join("sessions"), "s-live", &pids, &slot);
+        assert_eq!(out, EngineBackfill::Registered(me));
+        assert!(pids.lock().unwrap().contains(&me), "alive entry must be registered");
+        assert_eq!(*slot.lock().unwrap(), Some(me));
+    }
+
+    #[test]
+    fn test_backfill_dead_entry_not_registered() {
+        // 探活插入门：注册表命中但 pid 已死 → 不入 self_pids、不写引擎槽，
+        // 返回 DeadEntry 交调用方终止轮询（封 stop/restart 后旧补登线程
+        // 稳定命中死条目的主泄漏路径）
+        let dir = tempfile::tempdir().unwrap();
+        let dead = spawn_dead_pid();
+        registry_fixture(dir.path(), dead, "s-dead");
+        let pids: Mutex<std::collections::HashSet<u32>> = Mutex::new(std::collections::HashSet::new());
+        let slot: Mutex<Option<u32>> = Mutex::new(None);
+        let out = backfill_engine_pid_once(&dir.path().join("sessions"), "s-dead", &pids, &slot);
+        assert_eq!(out, EngineBackfill::DeadEntry(dead));
+        assert!(!pids.lock().unwrap().contains(&dead), "dead entry must not be registered");
+        assert_eq!(*slot.lock().unwrap(), None);
     }
 
     #[test]
