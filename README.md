@@ -35,6 +35,23 @@ npm run tauri build   # 打包
 
 > 本仓库自带 `src-tauri/.cargo/config.toml`，将 crates.io 指向 rsproxy.cn 镜像（原因：镜像区域网络，直连不稳）。如需还原官方源，删除该文件即可。
 
+## antcc 环境适配
+
+公司环境跑 antcc 变体（数据目录与启动链路不同，数据格式与原生 Claude Code 同构），差异收敛在 `src-tauri/src/cc_env.rs` 一处：
+
+- **目录探测**：`claude_data_dir` —— `~/.codefuse/engine/cc/sessions` 在场即判定变体环境，数据目录用 `~/.codefuse/engine/cc`；否则回退原生 `~/.claude`。watcher 轮询与聊天侧注册表反查共用同一口径；变体与原生并存时只看变体（不做双目录合并监控）
+- **聊天 CLI 解析**：`resolve_chat_cli` —— 变体环境经托管入口启动：`cfuse --skip-update`（PATH 上找不到 `cfuse` 则落日志原地报错，不静默回退裸 `claude`——它连不上 antcc 网关）；原生环境仍是裸 `claude`
+- **workdir 策略**：变体环境子进程工作目录落 `~/.cc-pets`（`cfuse` 禁止 `$HOME` 作工作目录），原生维持 `$HOME` 不变；spawn 时 `create_dir_all` 幂等落目录
+- **引擎 pid 补登**：变体注册表 `<pid>.json` 记的是引擎子进程 pid（非 spawn 的 `cfuse` 包装进程）——收到 init 行后后台线程按 sessionId 反查注册表（15 次 × 400ms 有界轮询），命中即把引擎 pid 补进 self_pids，保证面板过滤「widget 自身聊天」对变体同样成立
+- **组杀**：聊天子进程 spawn 时即独立进程组（pgid = 子 pid）；主动停止按 `killpg(SIGKILL)` → `child.kill()` 兜底 → wait 收尸，一锅端 `cfuse` → 引擎子进程链，不留孤儿；stdout EOF 自然退出收尸路径不组杀（防 pgid 复用误伤）
+
+### 公司环境验收锚点
+
+1. **动画联动**：猫随变体会话 busy/idle 实时切换动画
+2. **完成通知**：回合完成弹系统通知，带结果摘要
+3. **面板过滤**：会话面板列出变体会话，且不含 widget 自身的聊天会话
+4. **退出干净**：聊天 spawn 后完全退出应用，`pgrep -fl` 查无孤儿引擎进程（`cfuse`/engine 均无残留）
+
 ## 人工验收清单
 
 1. **启动**：操作——`npm run tauri dev` 启动应用。预期——桌面出现透明小猫（288×312 置顶窗，含缩放余量；精灵本体仍 192×208 逻辑尺寸），播 idle 呼吸动画，可拖动。

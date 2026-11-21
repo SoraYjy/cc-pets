@@ -7,7 +7,10 @@
 use serde_json::Value;
 use std::path::Path;
 
-/// `~/.claude/sessions/<pid>.json` 的关键字段子集（camelCase 原始字段见解析函数）。
+/// session 注册表 `<数据目录>/sessions/<pid>.json` 的关键字段子集（camelCase
+/// 原始字段见解析函数）。数据目录不在此硬编码——由调用方经
+/// `cc_env::claude_data_dir` 探测注入（原生 `~/.claude`、antcc 变体
+/// `~/.codefuse/engine/cc`）。
 pub struct SessionEntry {
     pub pid: u32,
     pub session_id: String,
@@ -216,7 +219,9 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-/// 轮询循环：每 tick 扫描 `~/.claude/sessions/*.json`，聚合 working 状态发
+/// 轮询循环：每 tick 扫描 `<数据目录>/sessions/*.json`（数据目录由调用方
+/// 经 `cc_env::claude_data_dir` 探测注入——原生 `~/.claude`、antcc 变体
+/// `~/.codefuse/engine/cc`，本函数不感知具体路径），聚合 working 状态发
 /// `session-status`（首 tick 及变化时）；对每个存活 session 增量尾读
 /// transcript，遇 turn_duration 行发 `turn-complete`（携带最近一次 end_turn
 /// 文本摘要，截断 4000 字符；系统通知由前端自行再截 200）。tick 末尾对
