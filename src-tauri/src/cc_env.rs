@@ -139,9 +139,7 @@ pub fn build_command(cli: &ChatCli) -> Command {
 /// 文件名非数字 / 值非字符串 / 读失败一律跳过；目录不存在或无人命中 →
 /// None。变体注册表记的是引擎子进程 pid（非 cfuse 包装进程），这正是
 /// 补登想要的值；原生环境引擎 pid == spawn pid，命中重复插入幂等无害。
-/// 消费点在 Task 2 的 Init 事件补登线程，本任务按计划先行交付——
-/// dead_code 检查在此放行（同 ChatProc::stderr_join 的「设计先行」口径）。
-#[allow(dead_code)]
+/// 消费点在 chat.rs 的 `backfill_engine_pid_once`（Init 事件补登线程）。
 pub fn scan_registry_for_session(sessions_dir: &Path, session_id: &str) -> Option<u32> {
     for entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
         let name = entry.file_name();
@@ -173,28 +171,48 @@ pub fn scan_registry_for_session(sessions_dir: &Path, session_id: &str) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::sync::Mutex;
     use tempfile::tempdir;
 
     /// PATH 是进程级全局（edition 2024 起 set_var 为 unsafe）。crate 内
     /// 唯一 env 读写点就是本模块，凡动 PATH 的测试统一经 [`with_path`]
-    /// 抢这把锁串行执行，锁区内无并发读方，竞态封死。
+    /// / [`with_path_unset`] 抢这把锁串行执行，锁区内无并发读方，竞态封死。
     static PATH_LOCK: Mutex<()> = Mutex::new(());
 
-    /// 串行区执行 `f`：抢 PATH_LOCK → 存旧 PATH → 设新值 → 跑断言 →
-    /// 还旧值。毒化锁直接 into_inner 继续（单测失败不应连坐后续测试）。
-    fn with_path<R>(path: &OsStr, f: impl FnOnce() -> R) -> R {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var_os("PATH");
-        // SAFETY：全 crate 唯一 env 写点，且在 PATH_LOCK 串行区内执行。
-        unsafe { std::env::set_var("PATH", path) };
-        let out = f();
-        match old {
-            Some(p) => unsafe { std::env::set_var("PATH", p) },
-            None => unsafe { std::env::remove_var("PATH") },
+    /// PATH 还原 drop guard：无论正常返回还是 `f()` panic 都还原 PATH——
+    /// 原顺序还原写法在 panic 时被跳过，「防连坐」恰好变成连坐。
+    struct PathGuard(Option<OsString>);
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(p) => unsafe { std::env::set_var("PATH", p) },
+                None => unsafe { std::env::remove_var("PATH") },
+            }
         }
-        out
+    }
+
+    /// 串行区执行 `f`：抢 PATH_LOCK → 存旧 PATH → 设新值 → 跑断言 →
+    /// 还旧值（Drop guard，panic 路径也还原）。毒化锁直接 into_inner
+    /// 继续（单测失败不应连坐后续测试）。
+    fn with_path<R>(path: &OsStr, f: impl FnOnce() -> R) -> R {
+        let _lock = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = PathGuard(std::env::var_os("PATH"));
+        // SAFETY：全 crate 唯一 env 写点，且在 PATH_LOCK 串行区内执行；
+        // 还原交 PathGuard::drop（声明顺序保证先还原 PATH 再放锁）。
+        unsafe { std::env::set_var("PATH", path) };
+        f()
+    }
+
+    /// PATH 未设（remove_var）的串行区：与 [`with_path`] 同锁同还原，
+    /// 覆盖 `var_os("PATH") == None` 分支的测试。
+    fn with_path_unset<R>(f: impl FnOnce() -> R) -> R {
+        let _lock = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = PathGuard(std::env::var_os("PATH"));
+        // SAFETY：全 crate 唯一 env 写点，且在 PATH_LOCK 串行区内执行。
+        unsafe { std::env::remove_var("PATH") };
+        f()
     }
 
     /// 造变体环境 fixture：`<home>/.codefuse/engine/cc/sessions/`。
@@ -251,6 +269,14 @@ mod tests {
         let empty = tempdir().unwrap();
         with_path(empty.path().as_os_str(), || {
             assert!(!find_in_path("cfuse"));
+        });
+    }
+
+    #[test]
+    fn test_find_in_path_unset() {
+        // PATH 未设（var_os 为 None）：找不到任何程序，不 panic
+        with_path_unset(|| {
+            assert!(!find_in_path("claude"), "unset PATH must not match");
         });
     }
 

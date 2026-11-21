@@ -383,12 +383,18 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
     let stderr = child.stderr.take();
     let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
         // 半启动失败：不留僵尸进程（文案随 cli.program 参数化——变体环境
-        // 这里是 cfuse，写死 claude 会误导排查）
+        // 这里是 cfuse，写死 claude 会误导排查）。与 stop 同序列 killpg →
+        // kill 兜底 → wait：此时组内大概率只有自己，防御一致性。
         let msg = format!(
             "chat spawn aborted: {} spawned without piped stdio",
             cli.program
         );
         crate::log_line(&msg);
+        let abort_pid = child.id();
+        #[cfg(unix)]
+        unsafe {
+            libc::killpg(abort_pid as libc::pid_t, libc::SIGKILL);
+        }
         let _ = child.kill();
         let _ = child.wait();
         return Err(msg);
@@ -466,20 +472,27 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
                             ) {
                                 EngineBackfill::Registered(ep) => {
                                     crate::log_line(&format!("engine pid backfilled: {ep}"));
-                                    break;
+                                    return;
                                 }
                                 EngineBackfill::DeadEntry(ep) => {
                                     crate::log_line(&format!(
                                         "engine pid {ep} in registry but not alive; \
                                          stop polling"
                                     ));
-                                    break;
+                                    return;
                                 }
                                 EngineBackfill::Miss => {
                                     std::thread::sleep(ENGINE_PID_SCAN_INTERVAL)
                                 }
                             }
                         }
+                        // 循环自然走完 = 全程未命中（非死条目终止）。落放弃
+                        // 日志：排障要区分「补登成功 / 死条目终止 / 静默放弃」
+                        // 三态，不能静默。
+                        crate::log_line(&format!(
+                            "engine pid backfill gave up after \
+                             {ENGINE_PID_SCAN_ATTEMPTS} attempts: sid={sid}"
+                        ));
                     });
                     let _ = handle.emit(
                         "chat-event",
@@ -504,7 +517,11 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
         // 读线程 EOF：claude 进程已退出。自然退出收殓：仅当槽里仍是自己
         // 这个实例才收走并落退出日志（防 spawn_chat 换新竞态下误收新
         // proc）；槽已空/换新 = chat_stop 已收殓，日志由 stop 路径落，这里
-        // 保持幂等 no-op，防双份 stderr 落盘。
+        // 保持幂等 no-op，防双份 stderr 落盘。engine_pid 从 take 到的实例
+        // 读出（先按 id 确认是自己的再 take），与 stop_internal 同口径
+        // 双移除——变体环境引擎 pid ≠ spawn pid，漏移会确定性滞留
+        // self_pids 至应用退出。
+        let mut engine_pid = None;
         let mut slot = chat_slot().lock().expect("chat slot poisoned");
         if slot
             .as_ref()
@@ -512,6 +529,7 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
             == Some(pid)
         {
             if let Some(p) = slot.take() {
+                engine_pid = *p.engine_pid.lock().expect("engine_pid poisoned");
                 // 兜底收尸防僵尸 + 落退出码与 stderr 缓冲（含对 stderr
                 // 线程的有界收尾等待，见 log_chat_exit）
                 let status = p.child.lock().expect("chat child poisoned").wait().ok();
@@ -519,7 +537,12 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
             }
         }
         drop(slot);
-        pids.lock().expect("self_pids poisoned").remove(&pid);
+        let mut set = pids.lock().expect("self_pids poisoned");
+        set.remove(&pid);
+        if let Some(ep) = engine_pid {
+            crate::log_line(&format!("chat eof: engine pid {ep} removed"));
+            set.remove(&ep);
+        }
     });
 
     crate::log_line(&format!("chat spawned (pid={pid})"));
@@ -603,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_parse_init_session_id_fallback_key_still_works() {
-        // T1 的 sessionId 回退键在 subtype init 门下保持有效
+        // sessionId 回退键在 subtype init 门下保持有效
         assert_eq!(
             parse_chat_line(r#"{"type":"system","subtype":"init","sessionId":"s-2"}"#),
             ChatEvent::Init {
@@ -642,9 +665,10 @@ mod tests {
 
     /// 造一个「确定已死」的真实 pid（同 watcher::tests::spawn_dead_pid 口径）：
     /// spawn 立即退出的子进程并 wait 收尸，wait 后短时间不被复用，测试窗口
-    /// 内 kill-0 稳定失败。
+    /// 内 kill-0 稳定失败。绝对路径 spawn：PATH 劫持窗口内按名 spawn 会
+    /// posix_spawnp ENOENT 连坐。
     fn spawn_dead_pid() -> u32 {
-        let mut child = std::process::Command::new("sleep")
+        let mut child = std::process::Command::new("/bin/sleep")
             .arg("0")
             .spawn()
             .expect("spawn dead-pid helper (sleep 0)");

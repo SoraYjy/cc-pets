@@ -743,9 +743,10 @@ mod poller_tests {
     }
 
     /// 造一个「确定已死」的真实 pid：spawn 一个立即退出的子进程并 wait 收尸。
-    /// wait 后短时间内不会被系统复用，测试窗口内 kill-0 稳定失败。
+    /// wait 后短时间内不会被系统复用，测试窗口内 kill-0 稳定失败。绝对路径
+    /// spawn：PATH 劫持窗口内按名 spawn 会 posix_spawnp ENOENT 连坐。
     fn spawn_dead_pid() -> u32 {
-        let mut child = std::process::Command::new("sleep")
+        let mut child = std::process::Command::new("/bin/sleep")
             .arg("0")
             .spawn()
             .expect("spawn dead-pid helper (sleep 0)");
@@ -1133,17 +1134,17 @@ mod poller_tests {
         let tmp = tempfile::tempdir().unwrap();
         let now = now_ms();
         // 存活探针子进程：sleep 自带限时，即使断言提前 panic 也会自行退出。
-        let mut proc_a = std::process::Command::new("sleep")
+        let mut proc_a = std::process::Command::new("/bin/sleep")
             .arg("20")
             .spawn()
             .expect("spawn live-pid helper (sleep)");
-        let mut proc_b = std::process::Command::new("sleep")
+        let mut proc_b = std::process::Command::new("/bin/sleep")
             .arg("20")
             .spawn()
             .expect("spawn live-pid helper (sleep)");
         // frozen 也要独立活 pid：golden 的 poller 把测试进程 pid 登记进了
         // self_pids（自有 chat 进程语义），frozen 若复用会被该过滤器剔除。
-        let mut proc_frozen = std::process::Command::new("sleep")
+        let mut proc_frozen = std::process::Command::new("/bin/sleep")
             .arg("20")
             .spawn()
             .expect("spawn live-pid helper (sleep)");
