@@ -35,6 +35,22 @@ npm run tauri build   # 打包
 
 > 本仓库自带 `src-tauri/.cargo/config.toml`，将 crates.io 指向 rsproxy.cn 镜像（原因：镜像区域网络，直连不稳）。如需还原官方源，删除该文件即可。
 
+## 接入其它封装版 Claude Code（可选）
+
+部分环境使用的 Claude Code 是封装变体：自有数据目录、经自有托管入口启动（数据格式与原生同构——sessions/projects/transcript 结构一致）。cc-pets 通过 settings.json 的两个可选字段接入这类形态，未配置即原生 Claude Code：
+
+```json
+{
+  "claudeDataDir": "/path/to/variant/cc",
+  "claudeChatLauncher": "your-launcher --your-flag"
+}
+```
+
+- **`claudeDataDir`**（可选）：变体的数据目录（支持 `~` 前缀）。配置后监控（会话面板/状态联动/完成通知）走该目录；否则用原生 `~/.claude`。要求其数据格式与原生同构
+- **`claudeChatLauncher`**（可选）：气泡聊天的启动命令（程序名 + 空格分隔参数）。配置后聊天经它启动、工作目录固定 `~/.cc-pets`（部分托管入口不允许 `$HOME` 作工作目录）；PATH 上找不到启动器会原地报错落日志，不静默回退原生 `claude`。未配置时聊天 = 原生裸 `claude`
+
+实现细节（`src-tauri/src/cc_env.rs`）：变体注册表 `<pid>.json` 记的是引擎子进程 pid——收到 init 行后按 sessionId 反查注册表（15 次 × 400ms 有界轮询 + 探活插入门）补进面板过滤集；聊天子进程 spawn 时即独立进程组，主动停止按 `killpg(SIGKILL)` 一锅端启动器 → 引擎子进程链，不留孤儿。
+
 ## 人工验收清单
 
 1. **启动**：操作——`npm run tauri dev` 启动应用。预期——桌面出现透明小猫（288×312 置顶窗，含缩放余量；精灵本体仍 192×208 逻辑尺寸），播 idle 呼吸动画，可拖动。

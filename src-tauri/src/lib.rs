@@ -5,6 +5,7 @@ use tauri::{Emitter, Manager, RunEvent};
 
 mod app_menu;
 mod chat;
+mod cc_env;
 mod opener;
 mod settings;
 mod skins;
@@ -117,10 +118,14 @@ pub fn run() {
             }
 
             // watcher 轮询线程：独立 std::thread，不阻塞主线程；
-            // 停止来源 = AppState.poller_stop（退出钩子置真）
-            let claude_dir = dirs::home_dir()
-                .expect("home dir must exist")
-                .join(".claude");
+            // 停止来源 = AppState.poller_stop（退出钩子置真）。
+            // 数据目录经 cc_env 解析：settings 配了 claudeDataDir（封装
+            // 变体）则用之，否则原生 ~/.claude。与聊天侧共用同一口径。
+            let settings = settings::load();
+            let claude_dir = cc_env::claude_data_dir(
+                &dirs::home_dir().expect("home dir must exist"),
+                settings.claude_data_dir.as_deref(),
+            );
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 watcher::run_poller(

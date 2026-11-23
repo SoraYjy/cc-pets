@@ -11,6 +11,14 @@ pub struct Settings {
     pub pet_skin: String,
     #[serde(default = "default_pet_zoom")]
     pub pet_zoom: f32,
+    /// 可选：封装变体 Claude Code 的数据目录（监控走它；缺省 = 原生
+    /// `~/.claude`）。手改配置文件设置，不经设置窗口。
+    #[serde(rename = "claudeDataDir", default, skip_serializing_if = "Option::is_none")]
+    pub claude_data_dir: Option<String>,
+    /// 可选：聊天启动命令（程序名 + 空格分隔参数；聊天经它启动，工作目录
+    /// 固定 `~/.cc-pets`）。缺省 = 原生裸 `claude`。手改配置文件设置。
+    #[serde(rename = "claudeChatLauncher", default, skip_serializing_if = "Option::is_none")]
+    pub claude_chat_launcher: Option<String>,
 }
 
 const DEFAULT_STYLE: &str = "c";
@@ -36,6 +44,8 @@ fn defaults() -> Settings {
         opacity: DEFAULT_OPACITY,
         pet_skin: default_pet_skin(),
         pet_zoom: PET_ZOOM_DEFAULT,
+        claude_data_dir: None,
+        claude_chat_launcher: None,
     }
 }
 
@@ -97,11 +107,23 @@ pub fn load_from(path: &Path) -> Settings {
         .and_then(|o| o.as_f64())
         .map(|o| o as f32)
         .unwrap_or(PET_ZOOM_DEFAULT);
+    // 变体字段（可选）：原样透传字符串（不校验存在性/可执行性——校验在
+    // 使用侧 cc_env，给手配置留完整排障空间）。
+    let claude_data_dir = v
+        .get("claudeDataDir")
+        .and_then(|s| s.as_str())
+        .map(String::from);
+    let claude_chat_launcher = v
+        .get("claudeChatLauncher")
+        .and_then(|s| s.as_str())
+        .map(String::from);
     Settings {
         style,
         opacity: clamp_opacity(opacity),
         pet_skin,
         pet_zoom: clamp_pet_zoom(pet_zoom),
+        claude_data_dir,
+        claude_chat_launcher,
     }
 }
 
@@ -136,6 +158,19 @@ pub fn get_settings() -> Settings {
 /// 可用性归前端）。
 #[tauri::command]
 pub fn save_settings(style: String, opacity: f32, pet_skin: String, pet_zoom: f32) -> Result<(), String> {
+    save_settings_at(&settings_path(), style, opacity, pet_skin, pet_zoom)
+}
+
+/// save_settings 的可测内核（指定路径）。读-改-写：手配字段
+/// （claudeDataDir/claudeChatLauncher）不经设置命令，必须原样保留——
+/// 整存会把它们抹掉（回归钉 test_save_settings_preserves_variant_fields）。
+pub fn save_settings_at(
+    path: &Path,
+    style: String,
+    opacity: f32,
+    pet_skin: String,
+    pet_zoom: f32,
+) -> Result<(), String> {
     if !valid_style(&style) {
         return Err(format!("invalid style: {style} (expected a|b|c)"));
     }
@@ -144,12 +179,12 @@ pub fn save_settings(style: String, opacity: f32, pet_skin: String, pet_zoom: f3
     } else {
         pet_skin
     };
-    save(&Settings {
-        style,
-        opacity: clamp_opacity(opacity),
-        pet_skin,
-        pet_zoom: clamp_pet_zoom(pet_zoom),
-    })
+    let mut current = load_from(path);
+    current.style = style;
+    current.opacity = clamp_opacity(opacity);
+    current.pet_skin = pet_skin;
+    current.pet_zoom = clamp_pet_zoom(pet_zoom);
+    save_to(path, &current)
 }
 
 #[cfg(test)]
@@ -171,7 +206,9 @@ mod tests {
                 style: "c".into(),
                 opacity: 0.92,
                 pet_skin: "default".into(),
-                pet_zoom: 1.0
+                pet_zoom: 1.0,
+                claude_data_dir: None,
+                claude_chat_launcher: None
             }
         );
     }
@@ -186,7 +223,9 @@ mod tests {
                 style: "c".into(),
                 opacity: 0.92,
                 pet_skin: "default".into(),
-                pet_zoom: 1.0
+                pet_zoom: 1.0,
+                claude_data_dir: None,
+                claude_chat_launcher: None
             }
         );
     }
@@ -232,9 +271,15 @@ mod tests {
             opacity: 0.5,
             pet_skin: "official".into(),
             pet_zoom: 0.8,
+            claude_data_dir: Some("~/my-cc".into()),
+            claude_chat_launcher: Some("mycc-launcher --flag".into()),
         };
         save_to(&path, &s).expect("save");
         assert_eq!(load_from(&path), s);
+        assert_eq!(
+            load_from(&path).claude_data_dir.as_deref(),
+            Some("~/my-cc")
+        );
     }
 
     #[test]

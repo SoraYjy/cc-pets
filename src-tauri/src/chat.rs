@@ -1,16 +1,18 @@
 //! Chat 运行时：spawn 常驻 `claude` CLI（双向 stream-json），把 stdout 行解析
 //! 成前端事件，把用户输入写进 stdin。多轮复用同一进程，Done 不杀进程。
 //!
-//! 纯逻辑（[`build_command`] / [`parse_chat_line`]）不触碰进程与 IO，全部单测；
+//! 纯逻辑（[`parse_chat_line`]；命令构造迁至 [`crate::cc_env::build_command`]，
+//! CLI/目录形态探测见 [`crate::cc_env`]）不触碰进程与 IO，全部单测；
 //! [`StderrRing`] 单测覆盖丢最旧/空快照；运行时（[`spawn_chat`] / [`chat_send`]
 //! / [`chat_stop`]）属集成行为，Task 9 人工验收。解析全程宽松，无 panic 路径。
 
 use crate::AppState;
+use crate::cc_env::{build_command, claude_data_dir, resolve_chat_cli, scan_registry_for_session};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ExitStatus};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -18,32 +20,6 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 // ===== 纯逻辑 =====
-
-/// 构造 `claude` CLI 命令：args 顺序即协议，env 剥离嵌套检测，
-/// 三向管道，工作目录 = 调用方给定目录（spawn 处传用户主目录）。
-pub fn build_command(workdir: &Path) -> Command {
-    let mut cmd = Command::new("claude");
-    cmd.args([
-        "--output-format",
-        "stream-json",
-        "--input-format",
-        "stream-json",
-        "--permission-prompt-tool",
-        "stdio",
-        "--replay-user-messages",
-        "--verbose",
-        "--permission-mode",
-        "acceptEdits",
-    ]);
-    // 嵌套检测剥离：widget 里 spawn 的 claude 不许被当成嵌套会话拒启。
-    // （若 Task 9 实测仍拒启，候选还有 CLAUDE_CODE_ENTRYPOINT，先不加。）
-    cmd.env_remove("CLAUDECODE");
-    cmd.current_dir(workdir);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd
-}
 
 /// 一行 stream-json 的解析结果。
 #[derive(Debug, Clone, PartialEq)]
@@ -60,7 +36,11 @@ pub enum ChatEvent {
 
 /// 宽松解析一行 stdout stream-json。未知/非法一律 [`ChatEvent::Ignored`]。
 /// 规则：
-/// - `type=="system"` → Init（`session_id` 优先，回退 `sessionId`；两键皆缺 → Ignored）
+/// - `type=="system"` 且 `subtype=="init"` → Init（`session_id` 优先，回退
+///   `sessionId`；两键皆缺 → Ignored）。subtype 缺失或非 "init" → Ignored
+///   （**即使带 session_id**——system 行家族很宽，hook_started /
+///   thinking_tokens 等也携带 session_id，不设门会把回合中的 system 行
+///   误当会话初始化，session_id 被其他会话的 id 反复覆盖）
 /// - `type=="assistant"` → 拼 content 中 type=="text" 的 text（thinking 不计入；
 ///   拼结果为空 ⟺ 无 text 项 → Ignored）
 /// - `type=="result"` 且 subtype 以 "compact" 开头 → Ignored
@@ -73,6 +53,9 @@ pub fn parse_chat_line(raw: &str) -> ChatEvent {
     };
     match v.get("type").and_then(Value::as_str) {
         Some("system") => {
+            if v.get("subtype").and_then(Value::as_str) != Some("init") {
+                return ChatEvent::Ignored;
+            }
             let sid = v
                 .get("session_id")
                 .or_else(|| v.get("sessionId"))
@@ -173,6 +156,12 @@ pub struct ChatProc {
     pub child: Mutex<Child>,
     pub stdin: Arc<Mutex<ChildStdin>>,
     pub session_id: Mutex<Option<String>>,
+    /// 引擎进程 pid（补登）：spawn 时 None，Init 后台补登线程从注册表反查
+    /// 命中后写入。包 `Arc<Mutex<_>>` 是补登线程无法经全局槽触碰 ChatProc
+    /// 本体（槽可能已被 take/换新）——spawn 时新建共享句柄，槽与线程各持
+    /// 一份同一 Arc，stop 时经本字段读出做 self_pids 双移除与诊断。迟到
+    /// 写入（stop 之后才命中）只落到无人再读的句柄，不构成误杀面。
+    pub engine_pid: Arc<Mutex<Option<u32>>>,
     pub stderr_ring: Arc<StderrRing>,
     /// stderr 读线程句柄：spawn 时存入备查；不在此 join——join 无界等待，
     /// 有界收尾由 [`log_chat_exit`] 经 `stderr_done` 信号完成。本字段按
@@ -203,6 +192,48 @@ fn chat_slot() -> &'static Mutex<Option<Arc<ChatProc>>> {
 
 /// 退出落盘前等待 stderr 线程收尾的上限（有界等待，防收殓方被卡死）。
 const STDERR_TAIL_WAIT: Duration = Duration::from_millis(200);
+
+/// 引擎 pid 补登轮询次数上限。注册表 `<pid>.json` 由引擎在 init 行之后
+/// 异步落盘，时序无保证——15 次 × 400ms（约 6s）有界轮询，命中即停。
+const ENGINE_PID_SCAN_ATTEMPTS: u32 = 15;
+/// 引擎 pid 补登轮询间隔。补登只影响面板过滤（self_pids）与 stop 双移除
+/// 完整性，组杀按进程组兜底覆盖引擎，超限放弃无安全后果。
+const ENGINE_PID_SCAN_INTERVAL: Duration = Duration::from_millis(400);
+
+/// 补登单次尝试结果。
+#[derive(Debug, Clone, PartialEq)]
+enum EngineBackfill {
+    /// 注册表命中且探活通过：已登记（self_pids + 引擎槽）。
+    Registered(u32),
+    /// 注册表命中但进程已死：不登记，轮询应终止（死条目不会消失，继续
+    /// 扫只会重复命中同一死 pid）。
+    DeadEntry(u32),
+    /// 注册表未命中（本轮注册表尚未落 / 目录缺失等）。
+    Miss,
+}
+
+/// 补登的单次尝试（可测）：注册表反查 → 探活插入门 → 登记。注册表条目
+/// 死后不删——stop/restart 后旧补登线程会稳定命中死引擎条目，故命中后先
+/// `kill(pid, 0)` 探活（复用 [`crate::watcher::pid_alive`]，非 unix 恒真
+/// 保持旧行为），存活才写入 self_pids 与引擎槽；探活失败返回
+/// [`EngineBackfill::DeadEntry`] 交调用方终止轮询。不落日志（调用方按
+/// 结果记，单测不污染 debug.log）。
+fn backfill_engine_pid_once(
+    sessions_dir: &Path,
+    session_id: &str,
+    pids: &Mutex<std::collections::HashSet<u32>>,
+    engine_slot: &Mutex<Option<u32>>,
+) -> EngineBackfill {
+    let Some(ep) = scan_registry_for_session(sessions_dir, session_id) else {
+        return EngineBackfill::Miss;
+    };
+    if !crate::watcher::pid_alive(ep) {
+        return EngineBackfill::DeadEntry(ep);
+    }
+    pids.lock().expect("self_pids poisoned").insert(ep);
+    *engine_slot.lock().expect("engine_pid poisoned") = Some(ep);
+    EngineBackfill::Registered(ep)
+}
 
 /// 进程退出统一落盘点（EOF 收尸与 chat_stop 两处共用）：先记退出码
 /// （信号死/拿不到写 unknown）；随后对 stderr 线程做有界收尾等待——
@@ -237,28 +268,41 @@ fn log_chat_exit(proc: &ChatProc, status: Option<ExitStatus>) {
 }
 
 /// stop 的内部实现（command 与退出钩子共用）：短暂持锁取走实例，锁外
-/// SIGKILL → `child.wait()` 收尸（SIGKILL 后立即返回，即「有界等待」的
-/// 形态）→ 落退出码与 stderr 缓冲（[`log_chat_exit`]：快照前对 stderr
-/// 线程做最多 200ms 的有界收尾等待——kill+wait 只保证进程死，不保证
-/// stderr 线程已写完残行；超时则快照现状并标注尾行可能截断）→
-/// self_pids 移除。stdin 不再需要「先置 None 语义关闭」的旧舞步：Arc
-/// 结构下 SIGKILL 即刻生效，proc 连同 stdin 句柄随 take 出槽后自然释放。
+/// 组杀 → `child.kill()` 兜底 → `child.wait()` 收尸（SIGKILL 后立即返回，
+/// 即「有界等待」的形态）→ 落退出码与 stderr 缓冲（[`log_chat_exit`]：
+/// 快照前对 stderr 线程做最多 200ms 的有界收尾等待——kill+wait 只保证
+/// 进程死，不保证 stderr 线程已写完残行；超时则快照现状并标注尾行可能
+/// 截断）→ self_pids 双移除（spawn pid + 补登的引擎 pid）。
+///
+/// 组杀序列（仅主动 kill 路径）：spawn 时 `process_group(0)` 使 pgid ==
+/// 子 pid，先 `killpg(SIGKILL)` 一锅端整个进程组（变体环境启动器 → 引擎
+/// 的子进程链全在组内，裸 kill 只杀得到包装进程、引擎会成孤儿），再
+/// `child.kill()` 兜底覆盖 killpg 权限/已退出等失败，最后 wait。EOF 自然
+/// 退出收尸路径不做组杀（进程已死，组可能已被复用，killpg 有误伤面）。
 pub fn stop_internal(state: &AppState) -> Result<(), String> {
     let taken = chat_slot().lock().expect("chat slot poisoned").take();
     if let Some(p) = taken {
-        // 单次持 child 锁完成 kill + wait 收尸（SIGKILL 后立即返回）
+        // kill 前读补登的引擎 pid（可能 None——注册表未及落盘/超限未命中），
+        // 供收尾时双移除。
+        let engine_pid = *p.engine_pid.lock().expect("engine_pid poisoned");
+        // 单次持 child 锁完成组杀 + 兜底 kill + wait 收尸
         let (pid, status) = {
             let mut c = p.child.lock().expect("chat child poisoned");
             let pid = c.id();
+            #[cfg(unix)]
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
             let _ = c.kill();
             (pid, c.wait().ok())
         };
         log_chat_exit(&p, status);
-        state
-            .self_pids
-            .lock()
-            .expect("self_pids poisoned")
-            .remove(&pid);
+        let mut pids = state.self_pids.lock().expect("self_pids poisoned");
+        pids.remove(&pid);
+        if let Some(ep) = engine_pid {
+            crate::log_line(&format!("chat stop: engine pid {ep} removed"));
+            pids.remove(&ep);
+        }
     }
     Ok(())
 }
@@ -300,20 +344,63 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
     let _ = stop_internal(state);
 
     let home = dirs::home_dir().ok_or_else(|| "home dir not found".to_string())?;
-    let mut child = build_command(&home)
+    // CLI 形态解析：settings 配了 claudeChatLauncher（封装变体）则走启动器，
+    // PATH 上缺它时落日志原地失败，不静默回退裸 claude（变体经自有鉴权/
+    // 鉴权启动，回退只会把失败藏得更深）。
+    let settings = crate::settings::load();
+    let cli = match resolve_chat_cli(&home, settings.claude_chat_launcher.as_deref()) {
+        Ok(cli) => cli,
+        Err(e) => {
+            crate::log_line(&e);
+            return Err(e);
+        }
+    };
+    // workdir 落目录放调用方（resolve 保持纯判定）：变体 workdir 是
+    // ~/.cc-pets（部分托管入口禁 $HOME 作工作目录）；原生 workdir=home 已存在，
+    // create_dir_all 幂等。失败落日志并原地返回——目录落不出，spawn 只会
+    // 以更难读的「No such file or directory」失败。
+    if let Err(e) = std::fs::create_dir_all(&cli.workdir) {
+        let msg = format!(
+            "failed to create chat workdir {}: {e}",
+            cli.workdir.display()
+        );
+        crate::log_line(&msg);
+        return Err(msg);
+    }
+    // 引擎 pid 补登的反查目录（与 watcher 同一口径）：claude_data_dir 探测
+    // 出的数据目录下 sessions 子目录（原生 ~/.claude/sessions；配置变体
+    // 时为其 claudeDataDir 下的 sessions）。Init 后的补登线程按 sessionId 在
+    // 这里反查引擎 pid。
+    let sessions_dir =
+        claude_data_dir(&home, settings.claude_data_dir.as_deref()).join("sessions");
+    // 引擎 pid 补登句柄：spawn 时 None；槽内 ChatProc 与 stdout 读线程
+    // （→ Init 起的补登线程）共享同一 Arc，stop 经 ChatProc 读出。
+    let engine_pid = Arc::new(Mutex::new(None::<u32>));
+    let mut child = build_command(&cli)
         .spawn()
-        .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        .map_err(|e| format!("failed to spawn {}: {e}", cli.program))?;
 
     let pid = child.id();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
-        // 半启动失败：不留僵尸 claude
-        crate::log_line("chat spawn aborted: claude spawned without piped stdio");
+        // 半启动失败：不留僵尸进程（文案随 cli.program 参数化——变体环境
+        // 这里是配置的启动器，写死 claude 会误导排查）。与 stop 同序列 killpg →
+        // kill 兜底 → wait：此时组内大概率只有自己，防御一致性。
+        let msg = format!(
+            "chat spawn aborted: {} spawned without piped stdio",
+            cli.program
+        );
+        crate::log_line(&msg);
+        let abort_pid = child.id();
+        #[cfg(unix)]
+        unsafe {
+            libc::killpg(abort_pid as libc::pid_t, libc::SIGKILL);
+        }
         let _ = child.kill();
         let _ = child.wait();
-        return Err("claude spawned without piped stdio".to_string());
+        return Err(msg);
     };
 
     state
@@ -347,6 +434,7 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
         child: Mutex::new(child),
         stdin: Arc::new(Mutex::new(stdin)),
         session_id: Mutex::new(None),
+        engine_pid: Arc::clone(&engine_pid),
         stderr_ring: Arc::clone(&ring),
         stderr_join,
         stderr_done: Mutex::new(err_rx),
@@ -366,6 +454,49 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
                         *p.session_id.lock().expect("session_id poisoned") =
                             Some(session_id.clone());
                     }
+                    // 引擎 pid 补登（封装变体：注册表 <pid>.json 记的是引擎
+                    // 子进程 pid，而非 spawn 的包装进程）。注册表落盘
+                    // 晚于 init 行，后台线程有界轮询反查；命中 → 补进
+                    // self_pids（面板过滤自身会话）+ 回填 ChatProc 的共享
+                    // engine_pid 句柄（stop 双移除）。stop 先到：迟到写入只
+                    // 落到无人再读的句柄，无误杀面；超限未命中：组杀按进程组
+                    // 兜底，只损失面板过滤的完整性。
+                    let sid = session_id.clone();
+                    let dir = sessions_dir.clone();
+                    let engine_slot = Arc::clone(&engine_pid);
+                    let pids_for_engine = Arc::clone(&pids);
+                    std::thread::spawn(move || {
+                        for _ in 0..ENGINE_PID_SCAN_ATTEMPTS {
+                            match backfill_engine_pid_once(
+                                &dir,
+                                &sid,
+                                &pids_for_engine,
+                                &engine_slot,
+                            ) {
+                                EngineBackfill::Registered(ep) => {
+                                    crate::log_line(&format!("engine pid backfilled: {ep}"));
+                                    return;
+                                }
+                                EngineBackfill::DeadEntry(ep) => {
+                                    crate::log_line(&format!(
+                                        "engine pid {ep} in registry but not alive; \
+                                         stop polling"
+                                    ));
+                                    return;
+                                }
+                                EngineBackfill::Miss => {
+                                    std::thread::sleep(ENGINE_PID_SCAN_INTERVAL)
+                                }
+                            }
+                        }
+                        // 循环自然走完 = 全程未命中（非死条目终止）。落放弃
+                        // 日志：排障要区分「补登成功 / 死条目终止 / 静默放弃」
+                        // 三态，不能静默。
+                        crate::log_line(&format!(
+                            "engine pid backfill gave up after \
+                             {ENGINE_PID_SCAN_ATTEMPTS} attempts: sid={sid}"
+                        ));
+                    });
                     let _ = handle.emit(
                         "chat-event",
                         serde_json::json!({ "kind": "init", "text": session_id }),
@@ -389,7 +520,11 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
         // 读线程 EOF：claude 进程已退出。自然退出收殓：仅当槽里仍是自己
         // 这个实例才收走并落退出日志（防 spawn_chat 换新竞态下误收新
         // proc）；槽已空/换新 = chat_stop 已收殓，日志由 stop 路径落，这里
-        // 保持幂等 no-op，防双份 stderr 落盘。
+        // 保持幂等 no-op，防双份 stderr 落盘。engine_pid 从 take 到的实例
+        // 读出（先按 id 确认是自己的再 take），与 stop_internal 同口径
+        // 双移除——变体环境引擎 pid ≠ spawn pid，漏移会确定性滞留
+        // self_pids 至应用退出。
+        let mut engine_pid = None;
         let mut slot = chat_slot().lock().expect("chat slot poisoned");
         if slot
             .as_ref()
@@ -397,6 +532,7 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
             == Some(pid)
         {
             if let Some(p) = slot.take() {
+                engine_pid = *p.engine_pid.lock().expect("engine_pid poisoned");
                 // 兜底收尸防僵尸 + 落退出码与 stderr 缓冲（含对 stderr
                 // 线程的有界收尾等待，见 log_chat_exit）
                 let status = p.child.lock().expect("chat child poisoned").wait().ok();
@@ -404,7 +540,12 @@ fn spawn_internal(app: &AppHandle, state: &AppState) -> Result<String, String> {
             }
         }
         drop(slot);
-        pids.lock().expect("self_pids poisoned").remove(&pid);
+        let mut set = pids.lock().expect("self_pids poisoned");
+        set.remove(&pid);
+        if let Some(ep) = engine_pid {
+            crate::log_line(&format!("chat eof: engine pid {ep} removed"));
+            set.remove(&ep);
+        }
     });
 
     crate::log_line(&format!("chat spawned (pid={pid})"));
@@ -471,48 +612,112 @@ pub fn chat_stop(state: State<'_, AppState>) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_command_strips_claudecode_env() {
-        let home = dirs::home_dir().expect("home dir must exist");
-        let cmd = build_command(&home);
-        // 注：stable std 无 Command::get_env（单键 getter 未稳定），
-        // 用 get_envs() 验证显式 remove 项 ("CLAUDECODE", None)。
-        let removed = cmd
-            .get_envs()
-            .any(|(k, v)| k == "CLAUDECODE" && v.is_none());
-        assert!(removed, "CLAUDECODE must be env_remove'd");
-        assert_eq!(cmd.get_program().to_string_lossy(), "claude");
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            args,
-            vec![
-                "--output-format",
-                "stream-json",
-                "--input-format",
-                "stream-json",
-                "--permission-prompt-tool",
-                "stdio",
-                "--replay-user-messages",
-                "--verbose",
-                "--permission-mode",
-                "acceptEdits",
-            ]
-        );
-        assert_eq!(cmd.get_current_dir(), Some(home.as_path()));
-    }
+    // 命令构造测试（test_command_strips_claudecode_env）随 build_command
+    // 迁至 cc_env.rs（原生形态断言原样保持，另补变体前缀形态钉）。
 
     #[test]
     fn test_parse_init() {
-        let ev = parse_chat_line(r#"{"type":"system","session_id":"s-1","model":"x"}"#);
+        let ev =
+            parse_chat_line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"x"}"#);
         assert_eq!(
             ev,
             ChatEvent::Init {
                 session_id: "s-1".to_string()
             }
         );
+    }
+
+    #[test]
+    fn test_parse_init_session_id_fallback_key_still_works() {
+        // sessionId 回退键在 subtype init 门下保持有效
+        assert_eq!(
+            parse_chat_line(r#"{"type":"system","subtype":"init","sessionId":"s-2"}"#),
+            ChatEvent::Init {
+                session_id: "s-2".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_system_without_subtype_ignored_even_with_sid() {
+        // 旧行为变更显式化（T2 收紧）：无 subtype 的 system 行即使带
+        // session_id 也不再当 Init
+        assert_eq!(
+            parse_chat_line(r#"{"type":"system","session_id":"s-1"}"#),
+            ChatEvent::Ignored
+        );
+    }
+
+    #[test]
+    fn test_parse_system_non_init_subtypes_ignored() {
+        // system 行家族其他 subtype 都可能携带 session_id，不设门会被误当
+        // 会话初始化（session_id 被其他会话 id 覆盖）
+        assert_eq!(
+            parse_chat_line(r#"{"type":"system","subtype":"hook_started","session_id":"s-1"}"#),
+            ChatEvent::Ignored
+        );
+        assert_eq!(
+            parse_chat_line(
+                r#"{"type":"system","subtype":"thinking_tokens","session_id":"s-1","tokens":5}"#
+            ),
+            ChatEvent::Ignored
+        );
+    }
+
+    // ---- 引擎 pid 补登探活插入门 ----
+
+    /// 造一个「确定已死」的真实 pid（同 watcher::tests::spawn_dead_pid 口径）：
+    /// spawn 立即退出的子进程并 wait 收尸，wait 后短时间不被复用，测试窗口
+    /// 内 kill-0 稳定失败。绝对路径 spawn：PATH 劫持窗口内按名 spawn 会
+    /// posix_spawnp ENOENT 连坐。
+    fn spawn_dead_pid() -> u32 {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn dead-pid helper (sleep 0)");
+        let pid = child.id();
+        let _ = child.wait();
+        pid
+    }
+
+    /// 造注册表 fixture：`<dir>/sessions/<pid>.json` 指向给定 session_id。
+    fn registry_fixture(dir: &Path, pid: u32, sid: &str) {
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"sessionId":"{sid}"}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_backfill_alive_entry_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = std::process::id(); // 活测用测试进程自身 pid（同 watcher 活测口径）
+        registry_fixture(dir.path(), me, "s-live");
+        let pids: Mutex<std::collections::HashSet<u32>> = Mutex::new(std::collections::HashSet::new());
+        let slot: Mutex<Option<u32>> = Mutex::new(None);
+        let out = backfill_engine_pid_once(&dir.path().join("sessions"), "s-live", &pids, &slot);
+        assert_eq!(out, EngineBackfill::Registered(me));
+        assert!(pids.lock().unwrap().contains(&me), "alive entry must be registered");
+        assert_eq!(*slot.lock().unwrap(), Some(me));
+    }
+
+    #[test]
+    fn test_backfill_dead_entry_not_registered() {
+        // 探活插入门：注册表命中但 pid 已死 → 不入 self_pids、不写引擎槽，
+        // 返回 DeadEntry 交调用方终止轮询（封 stop/restart 后旧补登线程
+        // 稳定命中死条目的主泄漏路径）
+        let dir = tempfile::tempdir().unwrap();
+        let dead = spawn_dead_pid();
+        registry_fixture(dir.path(), dead, "s-dead");
+        let pids: Mutex<std::collections::HashSet<u32>> = Mutex::new(std::collections::HashSet::new());
+        let slot: Mutex<Option<u32>> = Mutex::new(None);
+        let out = backfill_engine_pid_once(&dir.path().join("sessions"), "s-dead", &pids, &slot);
+        assert_eq!(out, EngineBackfill::DeadEntry(dead));
+        assert!(!pids.lock().unwrap().contains(&dead), "dead entry must not be registered");
+        assert_eq!(*slot.lock().unwrap(), None);
     }
 
     #[test]
